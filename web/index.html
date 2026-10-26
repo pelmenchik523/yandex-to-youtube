@@ -1,0 +1,523 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Станция · YouTube</title>
+<style>
+  :root{
+    --bg:#090d16;
+    --panel:rgba(18,25,40,.82);
+    --panel2:rgba(25,34,54,.72);
+    --line:rgba(255,255,255,.08);
+    --text:#eef3ff;
+    --muted:#8b9ab8;
+    --accent:#5b8cff;
+    --accent2:#9b6bff;
+    --good:#42d392;
+    --bad:#ff5c7a;
+    --ring:#2f6bff;
+    --shadow:0 20px 60px rgba(0,0,0,.35);
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0;
+    font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;
+    color:var(--text);
+    background:
+      radial-gradient(900px 500px at 12% -10%, rgba(91,140,255,.22), transparent 60%),
+      radial-gradient(800px 500px at 100% 0%, rgba(155,107,255,.18), transparent 55%),
+      var(--bg);
+    min-height:100vh;
+  }
+  .wrap{max-width:1220px;margin:0 auto;padding:26px 18px 60px}
+  header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:22px}
+  .brand{display:flex;align-items:center;gap:13px;min-width:0}
+  .logo{
+    width:42px;height:42px;border-radius:14px;flex:0 0 auto;
+    background:linear-gradient(135deg,var(--accent),var(--accent2));
+    box-shadow:0 10px 30px rgba(91,140,255,.35);
+    display:grid;place-items:center;font-size:20px
+  }
+  .brand h1{font-size:19px;margin:0;letter-spacing:.2px;white-space:nowrap}
+  .brand p{margin:2px 0 0;color:var(--muted);font-size:12.5px}
+  .pill{
+    display:flex;align-items:center;gap:8px;padding:8px 12px;border:1px solid var(--line);
+    border-radius:999px;background:rgba(255,255,255,.03);color:var(--muted);font-size:12.5px
+  }
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--good);box-shadow:0 0 12px var(--good)}
+  .dot.off{background:var(--bad);box-shadow:0 0 12px var(--bad)}
+  .grid{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(320px,.95fr);gap:18px;align-items:start}
+  .col{display:flex;flex-direction:column;gap:18px;min-width:0}
+  .card{
+    background:var(--panel);border:1px solid var(--line);border-radius:22px;
+    padding:20px;box-shadow:var(--shadow);backdrop-filter:blur(14px)
+  }
+  .card h2{font-size:14px;margin:0 0 14px;color:#cfd9ee;font-weight:600;letter-spacing:.4px;text-transform:uppercase}
+  .now{display:flex;gap:18px;align-items:center;min-width:0}
+  .cover{
+    width:176px;height:99px;border-radius:16px;flex:0 0 auto;overflow:hidden;position:relative;
+    background:linear-gradient(135deg,#1d2b4a,#35245c);box-shadow:0 14px 34px rgba(0,0,0,.35)
+  }
+  .cover img{width:100%;height:100%;object-fit:cover;display:block}
+  .cover .vinyl{position:absolute;inset:0;display:grid;place-items:center;font-size:30px;opacity:.55}
+  .now-info{min-width:0;flex:1}
+  .eyebrow{font-size:11.5px;color:var(--muted);letter-spacing:.9px;text-transform:uppercase;margin-bottom:6px}
+  .title{font-size:21px;line-height:1.25;margin:0 0 8px;font-weight:650;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+  .sub{color:var(--muted);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .progress{margin-top:18px}
+  .bar{height:7px;border-radius:999px;background:rgba(255,255,255,.08);overflow:hidden;position:relative}
+  .bar > i{display:block;height:100%;width:0;border-radius:999px;background:linear-gradient(90deg,var(--accent),var(--accent2));transition:width .35s linear}
+  .times{display:flex;justify-content:space-between;color:var(--muted);font-size:12px;margin-top:8px}
+  .controls{display:flex;align-items:center;justify-content:center;gap:14px;margin:16px 0 4px}
+  .iconbtn{
+    border:1px solid var(--line);background:rgba(255,255,255,.04);color:var(--text);
+    width:46px;height:46px;border-radius:50%;display:grid;place-items:center;cursor:pointer;
+    transition:transform .12s ease,background .12s ease,border-color .12s ease
+  }
+  .iconbtn:hover{background:rgba(255,255,255,.09);border-color:rgba(255,255,255,.18);transform:translateY(-1px)}
+  .iconbtn:active{transform:scale(.96)}
+  .iconbtn.primary{
+    width:60px;height:60px;border:0;background:linear-gradient(135deg,var(--accent),var(--accent2));
+    box-shadow:0 12px 30px rgba(91,140,255,.35)
+  }
+  .iconbtn svg{width:21px;height:21px;fill:currentColor}
+  .iconbtn.primary svg{width:26px;height:26px}
+  .volume{display:flex;align-items:center;gap:12px;margin-top:16px;color:var(--muted);font-size:12.5px}
+  .volume svg{width:18px;height:18px;fill:currentColor;flex:0 0 auto}
+  input[type=range]{
+    -webkit-appearance:none;appearance:none;width:100%;height:5px;border-radius:999px;
+    background:rgba(255,255,255,.12);outline:none;cursor:pointer
+  }
+  input[type=range]::-webkit-slider-thumb{
+    -webkit-appearance:none;width:17px;height:17px;border-radius:50%;background:#fff;
+    border:4px solid var(--accent);box-shadow:0 2px 10px rgba(0,0,0,.35)
+  }
+  input[type=range]::-moz-range-thumb{width:17px;height:17px;border-radius:50%;background:#fff;border:4px solid var(--accent)}
+  .search{display:flex;gap:10px;margin-top:18px}
+  .search input[type=text]{
+    flex:1;min-width:0;border:1px solid var(--line);background:rgba(255,255,255,.04);color:var(--text);
+    border-radius:14px;padding:13px 15px;font-size:14px;outline:none
+  }
+  .search input[type=text]:focus{border-color:rgba(91,140,255,.55);box-shadow:0 0 0 4px rgba(91,140,255,.12)}
+  .btn{
+    border:1px solid var(--line);background:rgba(255,255,255,.06);color:var(--text);
+    border-radius:14px;padding:12px 16px;font-size:13.5px;font-weight:600;cursor:pointer;
+    transition:background .12s ease,transform .12s ease
+  }
+  .btn:hover{background:rgba(255,255,255,.11)}
+  .btn:active{transform:scale(.98)}
+  .btn.accent{border:0;background:linear-gradient(135deg,var(--accent),var(--accent2));box-shadow:0 10px 24px rgba(91,140,255,.25)}
+  .btn.ghost{background:transparent;color:var(--muted)}
+  .btn.danger{border-color:rgba(255,92,122,.35);background:rgba(255,92,122,.1);color:#ffb1c0}
+  .btn.danger:hover{background:rgba(255,92,122,.18)}
+  .btn:disabled{opacity:.45;cursor:not-allowed;transform:none}
+  .queue-head{display:flex;justify-content:space-between;align-items:center;margin-top:18px;color:var(--muted);font-size:11.5px;letter-spacing:.8px;text-transform:uppercase}
+  .queue{margin-top:6px;display:flex;flex-direction:column;gap:6px;max-height:250px;overflow:auto;padding-right:4px}
+  .qitem{display:flex;align-items:center;gap:11px;padding:9px 10px;border-radius:13px;cursor:pointer;border:1px solid transparent}
+  .qitem:hover{background:rgba(255,255,255,.05);border-color:var(--line)}
+  .qplay{width:30px;height:30px;border-radius:50%;display:grid;place-items:center;background:rgba(91,140,255,.15);color:#9db9ff;flex:0 0 auto;font-size:12px}
+  .qtitle{flex:1;min-width:0;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#dce5f7}
+  .qdur{font-size:12px;color:var(--muted);flex:0 0 auto}
+  .empty{color:var(--muted);font-size:13px;padding:10px 2px}
+  .ledwrap{display:flex;gap:20px;align-items:center;margin-bottom:16px}
+  .ring{
+    width:138px;height:138px;border-radius:50%;flex:0 0 auto;position:relative;
+    border:16px solid var(--ring);box-shadow:0 0 34px var(--ring),inset 0 0 26px rgba(255,255,255,.08);
+    transition:border-color .2s ease,box-shadow .2s ease;background:rgba(255,255,255,.02)
+  }
+  .ring::after{
+    content:"";position:absolute;inset:26px;border-radius:50%;
+    background:radial-gradient(circle at 35% 30%,rgba(255,255,255,.14),rgba(0,0,0,.16));
+    border:1px solid rgba(255,255,255,.08)
+  }
+  .ring.auto{border-color:#2f6bff;box-shadow:0 0 30px rgba(47,107,255,.75)}
+  .ring.breathing{animation:breathe 2.8s ease-in-out infinite}
+  @keyframes breathe{0%,100%{filter:brightness(.72);box-shadow:0 0 18px var(--ring)}50%{filter:brightness(1.12);box-shadow:0 0 50px var(--ring)}}
+  .ring.off{border-color:#222a3d;box-shadow:none}
+  .ledmeta{min-width:0;flex:1}
+  .ledmeta .lbl{font-size:12px;color:var(--muted);margin-bottom:7px}
+  .row{display:flex;align-items:center;gap:10px;margin-top:10px}
+  .swatches{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+  .sw{width:28px;height:28px;border-radius:50%;border:2px solid rgba(255,255,255,.18);cursor:pointer;padding:0}
+  .sw:hover{transform:scale(1.08)}
+  .modes{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:14px}
+  .modes .btn{padding:10px 8px;font-size:12.5px}
+  .powerrow{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:12px 0;border-bottom:1px solid var(--line)}
+  .powerrow:last-of-type{border-bottom:0}
+  .switch{position:relative;width:52px;height:29px;flex:0 0 auto}
+  .switch input{opacity:0;width:0;height:0}
+  .slider{position:absolute;inset:0;border-radius:999px;background:rgba(255,255,255,.14);cursor:pointer;transition:.2s}
+  .slider:before{content:"";position:absolute;width:21px;height:21px;left:4px;top:4px;border-radius:50%;background:#fff;transition:.2s;box-shadow:0 2px 8px rgba(0,0,0,.3)}
+  .switch input:checked + .slider{background:linear-gradient(135deg,var(--accent),var(--accent2))}
+  .switch input:checked + .slider:before{transform:translateX(23px)}
+  .actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}
+  .note{color:var(--muted);font-size:12px;line-height:1.55;margin-top:12px}
+  .webhook{display:flex;gap:8px;margin-top:10px}
+  .webhook code{
+    flex:1;min-width:0;background:rgba(0,0,0,.28);border:1px solid var(--line);border-radius:12px;
+    padding:11px 12px;font-size:12px;color:#bcd0ff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap
+  }
+  .statusline{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px;margin-top:12px}
+  .spinner{
+    width:13px;height:13px;border-radius:50%;border:2px solid rgba(255,255,255,.18);
+    border-top-color:var(--accent);animation:spin .8s linear infinite;display:none
+  }
+  .spinner.on{display:inline-block}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .toast{
+    position:fixed;left:50%;bottom:24px;transform:translateX(-50%) translateY(20px);
+    background:#151d30;border:1px solid var(--line);color:var(--text);padding:12px 16px;border-radius:14px;
+    box-shadow:var(--shadow);font-size:13px;opacity:0;pointer-events:none;transition:.2s;z-index:50;max-width:90vw
+  }
+  .toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
+  .offline{opacity:.55}
+  @media(max-width:900px){
+    .grid{grid-template-columns:1fr}
+    .cover{width:128px;height:72px}
+    .title{font-size:18px}
+    .wrap{padding:18px 12px 44px}
+    header{align-items:flex-start;flex-direction:column}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <div class="logo">▶</div>
+      <div>
+        <h1>Станция · YouTube</h1>
+        <p>Мост на этом компьютере · <span id="host">—</span></p>
+      </div>
+    </div>
+    <div class="pill"><span class="dot" id="dot"></span><span id="conn">подключение…</span></div>
+  </header>
+
+  <div class="grid">
+    <div class="col">
+      <section class="card">
+        <h2>Что играет</h2>
+        <div class="now">
+          <div class="cover" id="coverBox">
+            <div class="vinyl">♪</div>
+            <img id="cover" alt="" style="display:none" onerror="this.style.display='none'">
+          </div>
+          <div class="now-info">
+            <div class="eyebrow" id="eyebrow">Плеер</div>
+            <h3 class="title" id="title">Ничего не играет</h3>
+            <div class="sub" id="sub">Скажи Алисе «включи …» или найди трек ниже</div>
+          </div>
+        </div>
+
+        <div class="progress">
+          <div class="bar"><i id="bar"></i></div>
+          <div class="times"><span id="elapsed">0:00</span><span id="duration">0:00</span></div>
+        </div>
+
+        <div class="controls">
+          <button class="iconbtn" id="prev" title="Предыдущий">
+            <svg viewBox="0 0 24 24"><path d="M6 5h2v14H6zm3.5 7L18 5v14z"/></svg>
+          </button>
+          <button class="iconbtn primary" id="toggle" title="Пауза / играть">
+            <svg id="toggleIcon" viewBox="0 0 24 24"><path d="M8 5h3v14H8zm5 0h3v14h-3z"/></svg>
+          </button>
+          <button class="iconbtn" id="next" title="Следующий">
+            <svg viewBox="0 0 24 24"><path d="M16 5h2v14h-2zM6 5l8.5 7L6 19z"/></svg>
+          </button>
+          <button class="iconbtn" id="stop" title="Стоп">
+            <svg viewBox="0 0 24 24"><path d="M7 7h10v10H7z"/></svg>
+          </button>
+        </div>
+
+        <div class="volume">
+          <svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4zm12.5 3a4.5 4.5 0 0 0-2.5-4v8a4.5 4.5 0 0 0 2.5-4z"/></svg>
+          <input type="range" id="volume" min="0" max="100" value="40">
+          <span id="volVal" style="min-width:34px;text-align:right">40%</span>
+        </div>
+
+        <form class="search" id="searchForm">
+          <input type="text" id="q" placeholder="Название трека или исполнитель" autocomplete="off">
+          <button class="btn accent" type="submit" id="searchBtn">Включить</button>
+        </form>
+
+        <div class="queue-head" id="queueHead"><span>Далее</span><span id="queueCount"></span></div>
+        <div class="queue" id="queue"><div class="empty">Очередь пуста</div></div>
+        <div class="statusline"><span class="spinner" id="spinner"></span><span id="statusText"></span></div>
+      </section>
+    </div>
+
+    <div class="col">
+      <section class="card">
+        <h2>Подсветка</h2>
+        <div class="ledwrap">
+          <div class="ring" id="ring"></div>
+          <div class="ledmeta">
+            <div class="lbl">Цвет верхнего кольца</div>
+            <input type="color" id="ledColor" value="#2f6bff" style="width:100%;height:38px;border:0;background:transparent;cursor:pointer">
+            <div class="lbl" style="margin-top:12px">Яркость</div>
+            <input type="range" id="ledBrightness" min="0" max="100" value="50">
+            <div class="swatches">
+              <button class="sw" data-color="#2f6bff" style="background:#2f6bff" title="Синий"></button>
+              <button class="sw" data-color="#9b6bff" style="background:#9b6bff" title="Фиолетовый"></button>
+              <button class="sw" data-color="#ff4d6d" style="background:#ff4d6d" title="Красный"></button>
+              <button class="sw" data-color="#42d392" style="background:#42d392" title="Зелёный"></button>
+              <button class="sw" data-color="#ffd166" style="background:#ffd166" title="Тёплый"></button>
+              <button class="sw" data-color="#ffffff" style="background:#fff" title="Белый"></button>
+            </div>
+          </div>
+        </div>
+        <div class="modes">
+          <button class="btn" id="ledStatic">Статика</button>
+          <button class="btn" id="ledBreath">Дыхание</button>
+          <button class="btn" id="ledAuto">Авто (Алиса)</button>
+          <button class="btn" id="ledOff">Выкл</button>
+        </div>
+        <div class="note" id="ledNote">Авто — кольцом управляет Алиса. Статика/дыхание забирают кольцо у Алисы до нажатия «Авто».</div>
+      </section>
+
+      <section class="card">
+        <h2>Питание</h2>
+        <div class="powerrow">
+          <div>
+            <div style="font-size:14px">Усилитель</div>
+            <div style="font-size:12px;color:var(--muted)">мгновенное вкл/выкл звука</div>
+          </div>
+          <label class="switch"><input type="checkbox" id="amp"><span class="slider"></span></label>
+        </div>
+        <div class="actions">
+          <button class="btn" id="reboot">Перезагрузить</button>
+          <button class="btn danger" id="poweroff">Выключить</button>
+        </div>
+        <div class="note">«Выключить» — полное выключение колонки. Включить обратно можно кнопкой на корпусе или умной розеткой; удалённого включения у Lite 2 нет.</div>
+      </section>
+
+      <section class="card">
+        <h2>Навык Алисы</h2>
+        <div class="note">Webhook для приватного навыка в dialogs.yandex.ru/developer:</div>
+        <div class="webhook">
+          <code id="webhook">туннель не запущен</code>
+          <button class="btn" id="copyWebhook" title="Скопировать">⧉</button>
+        </div>
+        <div class="note" id="skillHint">Фраза: «Алиса, попроси Ютуб включить …»</div>
+      </section>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>window.__INITIAL_STATE__ = null;</script>
+<script>
+const $ = (id) => document.getElementById(id);
+const state = { data:{}, ledEditing:0, volumeTimer:0, ledTimer:0, fails:0, poweringOff:false };
+
+function fmt(sec){
+  sec = Math.max(0, Math.floor(Number(sec)||0));
+  const m = Math.floor(sec/60), s = sec%60;
+  return m + ":" + String(s).padStart(2,"0");
+}
+function esc(s){ return String(s??""); }
+function toast(msg){
+  const t = $("toast"); t.textContent = msg; t.classList.add("on");
+  clearTimeout(t._t); t._t = setTimeout(()=>t.classList.remove("on"), 2600);
+}
+async function api(path){
+  const r = await fetch(path, {cache:"no-store"});
+  if(!r.ok) throw new Error("HTTP "+r.status);
+  return await r.json();
+}
+function setOnline(ok){
+  $("dot").classList.toggle("off", !ok);
+  $("conn").textContent = ok ? "мост на связи" : "нет связи с мостом";
+}
+async function refresh(){
+  if(state.poweringOff) return;
+  try{
+    const d = await api("/api/status");
+    state.data = d; state.fails = 0; setOnline(true); render(d);
+  }catch(e){
+    state.fails++;
+    if(state.fails >= 2) setOnline(false);
+  }
+}
+function render(d){
+  setOnline(true);
+  const tr = d.track;
+  $("host").textContent = location.host;
+  const cover = $("cover"), box = $("coverBox");
+  if(tr && tr.id){
+    const src = "https://i.ytimg.com/vi/" + encodeURIComponent(tr.id) + "/hqdefault.jpg";
+    if(cover.getAttribute("src") !== src){ cover.setAttribute("src", src); cover.style.display="block"; }
+  }else{
+    cover.style.display="none"; cover.removeAttribute("src");
+  }
+  $("title").textContent = tr ? tr.title : (d.downloading ? "Ищу трек…" : "Ничего не играет");
+  $("sub").textContent = tr ? "YouTube · " + (d.player==="gst" ? "прямой поток" : d.player) : "Скажи Алисе «включи …» или найди трек ниже";
+  $("eyebrow").textContent = tr ? (d.paused ? "Пауза" : "Сейчас играет") : "Плеер";
+
+  const dur = Number(d.duration || (tr && tr.duration) || 0);
+  const el = Math.min(Number(d.elapsed||0), dur || 1e9);
+  $("bar").style.width = dur ? Math.max(0, Math.min(100, el/dur*100)) + "%" : "0%";
+  $("elapsed").textContent = fmt(el);
+  $("duration").textContent = fmt(dur);
+
+  $("toggleIcon").innerHTML = (!tr || d.paused)
+    ? '<path d="M8 5l11 7-11 7z"/>'
+    : '<path d="M8 5h3v14H8zm5 0h3v14h-3z"/>';
+  $("prev").disabled = !(d.history_pos > 0);
+  $("next").disabled = !(d.queue_len > 0 || d.history_pos < d.history_len - 1);
+  $("spinner").classList.toggle("on", !!d.downloading);
+  $("statusText").textContent = d.downloading ? "Ищу и готовлю трек…" : (d.last_error ? "Ошибка: " + d.last_error : "");
+
+  const vol = Number(d.volume ?? 40);
+  if(document.activeElement !== $("volume")) $("volume").value = vol;
+  $("volVal").textContent = vol + "%";
+
+  const q = Array.isArray(d.queue) ? d.queue : [];
+  const qbox = $("queue");
+  $("queueHead").style.display = q.length ? "flex" : "none";
+  $("queueCount").textContent = q.length ? q.length + " в очереди" : "";
+  if(!q.length){
+    qbox.innerHTML = '<div class="empty">Очередь пуста</div>';
+  }else{
+    qbox.innerHTML = "";
+    q.forEach(item=>{
+      const row = document.createElement("div");
+      row.className = "qitem";
+      row.title = "Включить";
+      const play = document.createElement("div"); play.className="qplay"; play.textContent="▶";
+      const t = document.createElement("div"); t.className="qtitle"; t.textContent=item.title || item.id;
+      const dur = document.createElement("div"); dur.className="qdur"; dur.textContent=fmt(item.duration||0);
+      row.append(play,t,dur);
+      row.onclick = async ()=>{ await api("/api/play_index?i="+item.i); toast("Включаю…"); refresh(); };
+      qbox.append(row);
+    });
+  }
+
+  const led = d.led || {};
+  const isAuto = led.mode === "auto";
+  const isOff = led.mode === "off";
+  const ring = $("ring");
+  ring.classList.toggle("auto", isAuto);
+  ring.classList.toggle("off", isOff);
+  ring.classList.toggle("breathing", led.mode === "breathing");
+  if(isAuto){
+    ring.style.setProperty("--ring", "#2f6bff");
+    $("ledNote").textContent = "Сейчас кольцом управляет Алиса.";
+  }else if(isOff){
+    ring.style.setProperty("--ring", "#222a3d");
+    $("ledNote").textContent = "Подсветка выключена.";
+  }else{
+    const col = `rgb(${led.r||0},${led.g||0},${led.b||0})`;
+    ring.style.setProperty("--ring", col);
+    if(Date.now() > state.ledEditing){
+      const hex = rgbToHex(led.r||0, led.g||0, led.b||0);
+      if($("ledColor").value.toLowerCase() !== hex.toLowerCase()) $("ledColor").value = hex;
+      $("ledBrightness").value = led.brightness ?? 50;
+    }
+    $("ledNote").textContent = led.mode === "breathing" ? "Дыхание включено." : "Статический цвет включён.";
+  }
+  $("amp").checked = !!d.amp_on;
+  const url = d.public_url ? d.public_url + "/alice" : "туннель не запущен";
+  $("webhook").textContent = url;
+  $("webhook").title = url;
+
+  document.body.classList.toggle("offline", false);
+}
+function rgbToHex(r,g,b){
+  return "#" + [r,g,b].map(v=>Math.max(0,Math.min(255,Number(v)||0)).toString(16).padStart(2,"0")).join("");
+}
+function hexToRgb(hex){
+  const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+  return m ? [parseInt(m[1],16),parseInt(m[2],16),parseInt(m[3],16)] : [47,107,255];
+}
+async function act(path, msg){
+  try{ await api(path); if(msg) toast(msg); refresh(); }
+  catch(e){ toast("Не получилось: " + e.message); }
+}
+
+$("toggle").onclick = ()=>{
+  if(!state.data.track){ $("q").focus(); return; }
+  act(state.data.paused ? "/api/resume" : "/api/pause");
+};
+$("prev").onclick = ()=> act("/api/prev");
+$("next").onclick = ()=> act("/api/next");
+$("stop").onclick = ()=> act("/api/stop");
+
+$("volume").addEventListener("input", ()=>{
+  clearTimeout(state.volumeTimer);
+  const v = $("volume").value;
+  $("volVal").textContent = v + "%";
+  state.volumeTimer = setTimeout(()=>act("/api/volume?v="+v), 220);
+});
+
+$("searchForm").addEventListener("submit", async (e)=>{
+  e.preventDefault();
+  const q = $("q").value.trim();
+  if(!q) return;
+  $("searchBtn").disabled = true;
+  try{
+    const r = await api("/api/play?q=" + encodeURIComponent(q));
+    if(r.ok){ toast("Ищу и включаю…"); $("q").value = ""; }
+    else toast("Не нашёл. Попробуй иначе.");
+  }catch(err){ toast("Ошибка поиска"); }
+  $("searchBtn").disabled = false;
+  refresh();
+});
+
+function applyLed(mode){
+  const [r,g,b] = hexToRgb($("ledColor").value);
+  const br = $("ledBrightness").value;
+  state.ledEditing = Date.now() + 1200;
+  clearTimeout(state.ledTimer);
+  state.ledTimer = setTimeout(()=>{
+    act(`/api/led?mode=${mode}&r=${r}&g=${g}&b=${b}&brightness=${br}`, mode==="breathing" ? "Дыхание включено" : "Цвет применён");
+  }, 140);
+}
+$("ledColor").addEventListener("input", ()=>applyLed("static"));
+$("ledBrightness").addEventListener("input", ()=>applyLed("static"));
+document.querySelectorAll(".sw").forEach(btn=>{
+  btn.onclick = ()=>{ $("ledColor").value = btn.dataset.color; applyLed("static"); };
+});
+$("ledStatic").onclick = ()=>{ state.ledEditing = Date.now()+1200; applyLed("static"); };
+$("ledBreath").onclick = ()=>{ state.ledEditing = Date.now()+1200; applyLed("breathing"); };
+$("ledAuto").onclick = ()=>{ clearTimeout(state.ledTimer); act("/api/led?mode=auto", "Кольцо снова у Алисы"); };
+$("ledOff").onclick = ()=>{ clearTimeout(state.ledTimer); act("/api/led?mode=off", "Подсветка выключена"); };
+
+$("amp").addEventListener("change", ()=>{
+  const on = $("amp").checked;
+  act("/api/power?action=" + (on ? "amp_on" : "amp_off"), on ? "Звук включён" : "Звук выключен");
+});
+
+$("reboot").onclick = async ()=>{
+  if(!confirm("Перезагрузить колонку? Она будет недоступна ~30–60 секунд.")) return;
+  toast("Перезагружаю…");
+  try{ await api("/api/power?action=reboot"); }
+  catch(e){ toast("Не удалось отправить команду"); }
+  setTimeout(refresh, 8000);
+};
+$("poweroff").onclick = async ()=>{
+  if(!confirm("Выключить колонку полностью? Включить обратно можно только вручную.")) return;
+  state.poweringOff = true;
+  toast("Выключаю. Для включения нажми кнопку на колонке.");
+  try{ await api("/api/power?action=poweroff"); }
+  catch(e){ state.poweringOff = false; toast("Не удалось выключить"); }
+};
+$("copyWebhook").onclick = async ()=>{
+  const text = $("webhook").textContent;
+  try{ await navigator.clipboard.writeText(text); toast("Скопировано"); return; }catch(e){}
+  const ta = document.createElement("textarea");
+  ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+  document.body.appendChild(ta); ta.select();
+  try{ document.execCommand("copy"); toast("Скопировано"); }
+  catch(e){ toast(text); }
+  ta.remove();
+};
+
+if (window.__INITIAL_STATE__) { state.data = window.__INITIAL_STATE__; render(state.data); }
+refresh();
+setInterval(refresh, 1000);
+</script>
+</body>
+</html>
