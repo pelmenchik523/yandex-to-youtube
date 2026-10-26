@@ -46,9 +46,9 @@ START_DELAY = float(os.environ.get("START_DELAY", "2.0"))
 AUTO_NEXT = os.environ.get("AUTO_NEXT", "1") == "1"
 PUBLIC_URL = os.environ.get("PUBLIC_URL", "").rstrip("/")
 
-SETTINGS_FILE = BASE / "settings.json"
-PLAYLISTS_FILE = BASE / "playlists.json"
-COOKIES_FILE = BASE / "cookies.txt"
+SETTINGS_FILE = Path(os.environ.get("BRIDGE_SETTINGS_FILE", str(BASE / "settings.json")))
+PLAYLISTS_FILE = Path(os.environ.get("BRIDGE_PLAYLISTS_FILE", str(BASE / "playlists.json")))
+COOKIES_FILE = Path(os.environ.get("BRIDGE_COOKIES_FILE", str(BASE / "cookies.txt")))
 
 DEFAULT_SETTINGS = {
     # Firefox on the PC already has the user's YouTube session.
@@ -56,7 +56,17 @@ DEFAULT_SETTINGS = {
     "cookies_file": "",
     "js_runtimes": "node",
     "playlist_limit": 50,
+    # Optional: http://host:port or socks5://host:port for blocked YouTube.
+    "proxy": "",
 }
+
+PLAYLIST_NAMES = {
+    "LL": "Мне понравилось",
+    "WL": "Смотреть позже",
+}
+
+YT_STATUS_CACHE: dict = {"at": 0.0, "data": None}
+PLAYLIST_LOAD: dict = {"id": 0}
 
 
 def load_settings() -> dict:
@@ -81,10 +91,58 @@ def save_settings(patch: dict) -> dict:
     data = load_settings()
     data.update(patch)
     try:
+        SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
         SETTINGS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     except OSError:
         pass
     return data
+
+
+def public_settings(settings: dict | None = None) -> dict:
+    s = settings or load_settings()
+    cfile = str(s.get("cookies_file") or "").strip()
+    try:
+        limit = int(s.get("playlist_limit") or 50)
+    except (TypeError, ValueError):
+        limit = 50
+    return {
+        "cookies_from_browser": str(s.get("cookies_from_browser") or ""),
+        "cookies_file": cfile,
+        "cookies_file_exists": bool(cfile) and Path(cfile).expanduser().exists(),
+        "js_runtimes": str(s.get("js_runtimes") or ""),
+        "playlist_limit": limit,
+        "proxy": str(s.get("proxy") or ""),
+    }
+
+
+def _invalidate_yt_status() -> None:
+    YT_STATUS_CACHE["at"] = 0.0
+    YT_STATUS_CACHE["data"] = None
+
+
+def update_youtube_settings(patch: dict) -> dict:
+    """Save only the YouTube-related settings, with light validation."""
+    allowed = {
+        "cookies_from_browser",
+        "cookies_file",
+        "js_runtimes",
+        "playlist_limit",
+        "proxy",
+    }
+    clean: dict = {}
+    for key, value in patch.items():
+        if key not in allowed:
+            continue
+        if key == "playlist_limit":
+            try:
+                clean[key] = max(1, min(500, int(value)))
+            except (TypeError, ValueError):
+                continue
+        else:
+            clean[key] = str(value or "").strip()
+    data = save_settings(clean)
+    _invalidate_yt_status()
+    return {"ok": True, "settings": public_settings(data)}
 
 
 def ytdlp_cookie_args(settings: dict | None = None) -> list[str]:
@@ -104,6 +162,9 @@ def ytdlp_base(settings: dict | None = None) -> list[str]:
     """Common yt-dlp arguments: JS challenge solver + YouTube cookies."""
     s = settings or load_settings()
     args = [YTDLP, "--no-warnings", "--force-ipv4"]
+    proxy = str(s.get("proxy") or "").strip()
+    if proxy:
+        args += ["--proxy", proxy]
     js = str(s.get("js_runtimes") or "").strip()
     if js:
         args += ["--js-runtimes", js]
@@ -209,6 +270,7 @@ class State:
         ssh(KILL_GST, timeout=10)
 
     def stop(self) -> None:
+        cancel_playlist_load()
         self.kill_current()
         with self.lock:
             self.track = None
@@ -216,6 +278,7 @@ class State:
             self.queue_pos = 0
             self.history = []
             self.history_pos = -1
+            self.playlist = None
 
     def stop_async(self) -> int:
         """Clear state immediately and stop the old gst process in background.
@@ -239,6 +302,7 @@ class State:
             self.queue_pos = 0
             self.history = []
             self.history_pos = -1
+            self.playlist = None
 
         if old_pid:
             def bg_kill() -> None:
@@ -281,6 +345,7 @@ class State:
                 "history_pos": self.history_pos,
                 "downloading": self.downloading,
                 "last_error": self.last_error,
+                "playlist": dict(self.playlist) if self.playlist else None,
                 "player": PLAYER_MODE,
                 "pc_ip": PC_IP,
                 "volume": self.volume,
@@ -293,10 +358,17 @@ class State:
 STATE = State()
 
 
+def cancel_playlist_load() -> None:
+    """Invalidate an in-flight playlist fetch without touching playback."""
+    with STATE.lock:
+        PLAYLIST_LOAD["id"] += 1
+        if STATE.playlist and STATE.playlist.get("loading"):
+            STATE.playlist = None
+            STATE.downloading = False
+
+
 def yt_search(query: str, limit: int = 1) -> list[dict]:
-    cmd = [
-        YTDLP,
-        "--no-warnings",
+    cmd = ytdlp_base() + [
         "--flat-playlist",
         "--print", "%(id)s\t%(title)s\t%(duration)s",
         f"ytsearch{limit}:{query}",
@@ -314,14 +386,248 @@ def yt_search(query: str, limit: int = 1) -> list[dict]:
     return items
 
 
+_PLAYLIST_ID_RE = re.compile(r"[?&]list=([A-Za-z0-9_-]+)")
+
+
+def parse_playlist_ref(ref: str) -> dict:
+    """Accept a playlist URL, a raw playlist id, or the LL/WL shortcuts."""
+    raw = (ref or "").strip()
+    if not raw:
+        raise ValueError("Укажи ссылку или ID плейлиста.")
+    if raw.lower() in ("ll", "wl"):
+        playlist_id = raw.upper()
+    else:
+        m = _PLAYLIST_ID_RE.search(raw)
+        if m:
+            playlist_id = m.group(1)
+            if playlist_id.upper() in ("LL", "WL"):
+                playlist_id = playlist_id.upper()
+            elif len(playlist_id) < 8:
+                raise ValueError(
+                    "ID плейлиста выглядит слишком коротким. "
+                    "Вставь полную ссылку или ID из YouTube."
+                )
+        elif re.fullmatch(r"[A-Za-z0-9_-]{10,100}", raw):
+            playlist_id = raw
+        else:
+            raise ValueError("Это не похоже на плейлист YouTube.")
+    return {
+        "id": playlist_id,
+        "url": f"https://www.youtube.com/playlist?list={playlist_id}",
+    }
+
+
+def fetch_playlist(ref: str, limit: int | None = None, fallback_name: str = "") -> dict:
+    """Read the first `limit` entries of a playlist, including private ones."""
+    p = parse_playlist_ref(ref)
+    settings = load_settings()
+    try:
+        max_items = int(limit or settings.get("playlist_limit") or 50)
+    except (TypeError, ValueError):
+        max_items = 50
+    max_items = max(1, min(500, max_items))
+
+    cmd = ytdlp_base(settings) + [
+        "--flat-playlist",
+        "--ignore-errors",
+        "--playlist-end", str(max_items),
+        "--print", "%(id)s\t%(title)s\t%(duration)s\t%(playlist_title)s\t%(playlist_index)s",
+        p["url"],
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("Плейлист не успел загрузиться за 3 минуты.")
+
+    entries: list[dict] = []
+    playlist_title = ""
+    for line in (proc.stdout or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2 or not parts[0].strip():
+            continue
+        title = parts[1].strip() or parts[0].strip()
+        try:
+            duration = (
+                float(parts[2])
+                if len(parts) > 2 and parts[2] not in ("NA", "None", "")
+                else 0.0
+            )
+        except ValueError:
+            duration = 0.0
+        if not playlist_title and len(parts) > 3 and parts[3] not in ("NA", "None"):
+            playlist_title = parts[3].strip()
+        entries.append({"id": parts[0].strip(), "title": title, "duration": duration})
+
+    if not entries:
+        err = (proc.stderr or "").strip()
+        low = err.lower()
+        if "private" in low:
+            raise RuntimeError("Плейлист приватный. Проверь вход в YouTube и cookies.")
+        if "sign in" in low or "login" in low or "cookies" in low:
+            raise RuntimeError("YouTube требует вход. Проверь cookies браузера.")
+        if "does not exist" in low or "not found" in low:
+            raise RuntimeError("Плейлист не найден.")
+        raise RuntimeError("Плейлист пуст или недоступен.")
+
+    name = (
+        PLAYLIST_NAMES.get(p["id"])
+        or playlist_title
+        or fallback_name.strip()
+        or "Плейлист"
+    )
+    return {"id": p["id"], "url": p["url"], "name": name, "entries": entries}
+
+
+def load_playlists() -> list[dict]:
+    """Load saved playlists; never fail because of a broken JSON file."""
+    try:
+        data = json.loads(PLAYLISTS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    out: list[dict] = []
+    for item in data:
+        if not isinstance(item, dict) or not item.get("id"):
+            continue
+        pid = str(item["id"])
+        try:
+            count = int(item.get("count") or 0)
+        except (TypeError, ValueError):
+            count = 0
+        out.append(
+            {
+                "id": pid,
+                "url": str(item.get("url") or f"https://www.youtube.com/playlist?list={pid}"),
+                "name": str(item.get("name") or PLAYLIST_NAMES.get(pid) or "Плейлист"),
+                "count": max(0, count),
+                "added": int(item.get("added") or 0),
+            }
+        )
+    return out
+
+
+def _write_playlists(items: list[dict]) -> None:
+    PLAYLISTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = PLAYLISTS_FILE.with_name(PLAYLISTS_FILE.name + ".tmp")
+    tmp.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(PLAYLISTS_FILE)
+
+
+def save_playlist(ref: str, name: str = "", count: int = 0) -> dict:
+    p = parse_playlist_ref(ref)
+    items = [x for x in load_playlists() if x.get("id") != p["id"]]
+    item = {
+        "id": p["id"],
+        "url": p["url"],
+        "name": name.strip() or PLAYLIST_NAMES.get(p["id"]) or "Плейлист",
+        "count": max(0, int(count or 0)),
+        "added": int(time.time()),
+    }
+    items.insert(0, item)
+    _write_playlists(items[:50])
+    _invalidate_yt_status()
+    return item
+
+
+def delete_playlist(playlist_id: str) -> dict:
+    pid = (playlist_id or "").strip()
+    if not pid:
+        return {"ok": False, "error": "Не указан плейлист."}
+    items = [x for x in load_playlists() if x.get("id") != pid]
+    _write_playlists(items)
+    _invalidate_yt_status()
+    return {"ok": True, "playlists": items}
+
+
+def youtube_status(force: bool = False, quick: bool = False) -> dict:
+    """Check whether yt-dlp can see the private LL playlist via cookies."""
+    now = time.time()
+    cached = YT_STATUS_CACHE.get("data")
+    if not force and cached and now - float(YT_STATUS_CACHE.get("at") or 0) < 30:
+        return cached
+
+    settings = load_settings()
+    result: dict = {
+        "ok": True,
+        "logged_in": False,
+        "message": "",
+        "settings": public_settings(settings),
+        "playlists": load_playlists(),
+    }
+
+    if quick:
+        if cached and now - float(YT_STATUS_CACHE.get("at") or 0) < 300:
+            result["logged_in"] = cached.get("logged_in")
+            result["message"] = cached.get("message") or ""
+        else:
+            result["logged_in"] = None
+            result["message"] = "Нажми «Проверить вход», чтобы проверить cookies."
+        return result
+
+    if not os.path.exists(YTDLP):
+        result["message"] = f"yt-dlp не найден: {YTDLP}"
+        _invalidate_yt_status()
+        YT_STATUS_CACHE.update({"at": now, "data": result})
+        return result
+    if not ytdlp_cookie_args(settings):
+        result["message"] = (
+            "Cookies не настроены: войди в YouTube в браузере на этом ПК "
+            "и укажи браузер либо путь к cookies.txt."
+        )
+        YT_STATUS_CACHE.update({"at": now, "data": result})
+        return result
+
+    ll_cmd = ytdlp_base(settings) + [
+        "--flat-playlist",
+        "--playlist-end", "1",
+        "--print", "%(id)s\t%(playlist_title)s",
+        "https://www.youtube.com/playlist?list=LL",
+    ]
+    try:
+        proc = subprocess.run(ll_cmd, capture_output=True, text=True, timeout=60)
+        lines = [line for line in (proc.stdout or "").splitlines() if line.strip()]
+        if proc.returncode == 0 and lines:
+            result["logged_in"] = True
+            result["message"] = "Вход работает: плейлист «Мне понравилось» доступен."
+        else:
+            feed_cmd = ytdlp_base(settings) + [
+                "--flat-playlist",
+                "--playlist-end", "5",
+                "--print", "%(id)s\t%(title)s",
+                "https://www.youtube.com/feed/playlists",
+            ]
+            feed = subprocess.run(feed_cmd, capture_output=True, text=True, timeout=60)
+            feed_lines = [line for line in (feed.stdout or "").splitlines() if line.strip()]
+            if feed.returncode == 0 and feed_lines:
+                result["logged_in"] = True
+                result["message"] = "Вход работает: YouTube отдал список плейлистов."
+            else:
+                err = ((proc.stderr or "") + "\n" + (feed.stderr or "")).strip()
+                low = err.lower()
+                if any(word in low for word in ("private", "sign in", "login", "cookies")):
+                    result["message"] = (
+                        "YouTube не отдал приватный плейлист. "
+                        "Проверь, что ты вошёл в выбранном браузере."
+                    )
+                else:
+                    last = err.splitlines()[-1][:300] if err else "yt-dlp вернул пустой ответ"
+                    result["message"] = f"Не удалось проверить вход: {last}"
+    except subprocess.TimeoutExpired:
+        result["message"] = "Проверка входа не успела за 60 секунд."
+    except Exception as exc:
+        result["message"] = f"Ошибка проверки входа: {exc}"
+
+    YT_STATUS_CACHE.update({"at": now, "data": result})
+    return result
+
+
 def download(video_id: str) -> Path:
     target = CACHE / f"{video_id}.mp3"
     if target.exists() and target.stat().st_size > 1024:
         return target
     outtmpl = str(CACHE / "%(id)s.%(ext)s")
-    cmd = [
-        YTDLP,
-        "--no-warnings",
+    cmd = ytdlp_base() + [
         "--no-playlist",
         "-f", "bestaudio/best",
         "-x",
@@ -330,7 +636,16 @@ def download(video_id: str) -> Path:
         "-o", outtmpl,
         f"https://www.youtube.com/watch?v={video_id}",
     ]
-    subprocess.run(cmd, check=True, timeout=600, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    proc = subprocess.run(
+        cmd,
+        timeout=600,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if proc.returncode != 0:
+        err = (proc.stderr or "").strip().splitlines()
+        raise RuntimeError(err[-1][:300] if err else "yt-dlp download failed")
     if not target.exists():
         # yt-dlp may have produced a different extension if ffmpeg failed
         candidates = sorted(CACHE.glob(f"{video_id}.*"), key=lambda p: p.stat().st_mtime, reverse=True)
@@ -466,6 +781,8 @@ def start_query_async(query: str) -> dict:
     if not query:
         return {"ok": False, "error": "empty query"}
 
+    # A new search cancels any playlist that is still being fetched.
+    cancel_playlist_load()
     # Clear state immediately; the old gst process is killed in background
     # so the Alice webhook does not wait for SSH.
     gen = STATE.stop_async()
@@ -504,6 +821,140 @@ def start_query_async(query: str) -> dict:
     return {"ok": True, "async": True}
 
 
+def start_playlist_async(
+    ref: str,
+    name: str = "",
+    limit: int | None = None,
+    save: bool = False,
+) -> dict:
+    """Load a playlist in the background and start its first track.
+
+    The current track keeps playing while the playlist is being fetched.
+    If the fetch fails (private playlist, bad URL, network), the old track is
+    left alone.
+    """
+    try:
+        p = parse_playlist_ref(ref)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+
+    display_name = name.strip() or PLAYLIST_NAMES.get(p["id"]) or ""
+    with STATE.lock:
+        PLAYLIST_LOAD["id"] += 1
+        load_id = PLAYLIST_LOAD["id"]
+        previous_playlist = dict(STATE.playlist) if STATE.playlist else None
+        STATE.playlist = {
+            "id": p["id"],
+            "url": p["url"],
+            "name": display_name,
+            "count": 0,
+            "loading": True,
+        }
+        STATE.downloading = True
+        STATE.last_error = ""
+
+    def worker() -> None:
+        gen = 0
+        switched = False
+        try:
+            pl = fetch_playlist(p["url"], limit=limit, fallback_name=name)
+            entries = pl["entries"]
+            if not entries:
+                raise RuntimeError("Плейлист пуст.")
+            track = entries[0]
+            queue = entries[1:]
+
+            # Only now, when the playlist is known to work, stop the old track.
+            with STATE.lock:
+                if load_id != PLAYLIST_LOAD["id"]:
+                    return
+            gen = STATE.stop_async()
+            switched = True
+            with STATE.lock:
+                if load_id != PLAYLIST_LOAD["id"] or gen != STATE.generation:
+                    return
+                STATE.playlist = {
+                    "id": pl["id"],
+                    "url": pl["url"],
+                    "name": pl["name"],
+                    "count": len(entries),
+                    "loading": False,
+                }
+                STATE.queue = queue
+                STATE.queue_pos = 0
+                STATE.downloading = True
+
+            if save:
+                try:
+                    save_playlist(pl["url"], pl["name"], len(entries))
+                except Exception:
+                    pass
+            path = download(track["id"])
+            with STATE.lock:
+                if load_id != PLAYLIST_LOAD["id"] or gen != STATE.generation:
+                    return
+            time.sleep(START_DELAY)
+            with STATE.lock:
+                if load_id != PLAYLIST_LOAD["id"] or gen != STATE.generation:
+                    return
+            _play_file(path, track)
+        except Exception as exc:
+            with STATE.lock:
+                if load_id == PLAYLIST_LOAD["id"]:
+                    STATE.last_error = f"playlist: {exc}"
+                    if switched and STATE.playlist:
+                        STATE.playlist["loading"] = False
+                    else:
+                        STATE.playlist = previous_playlist
+        finally:
+            with STATE.lock:
+                if load_id == PLAYLIST_LOAD["id"]:
+                    STATE.downloading = False
+
+    threading.Thread(target=worker, daemon=True).start()
+    return {
+        "ok": True,
+        "async": True,
+        "playlist": {
+            "id": p["id"],
+            "url": p["url"],
+            "name": display_name,
+            "count": 0,
+            "loading": True,
+        },
+    }
+
+
+def playlist_save(ref: str = "", name: str = "") -> dict:
+    """Save a URL, or the playlist that is currently loaded, without playing it."""
+    raw = (ref or "").strip()
+    if raw:
+        try:
+            settings = load_settings()
+            pl = fetch_playlist(
+                raw,
+                limit=settings.get("playlist_limit") or 50,
+                fallback_name=name,
+            )
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        item = save_playlist(pl["url"], name or pl["name"], len(pl["entries"]))
+        return {"ok": True, "playlist": item, "playlists": load_playlists()}
+
+    with STATE.lock:
+        current = dict(STATE.playlist or {})
+    if not current.get("id"):
+        return {"ok": False, "error": "Сначала включи или загрузи плейлист."}
+    if current.get("loading"):
+        return {"ok": False, "error": "Плейлист ещё загружается."}
+    item = save_playlist(
+        str(current.get("url") or current["id"]),
+        name or str(current.get("name") or ""),
+        int(current.get("count") or 0),
+    )
+    return {"ok": True, "playlist": item, "playlists": load_playlists()}
+
+
 def _start_track(track: dict, record: bool = True) -> dict:
     """Stop the current track and start another one in the background."""
     STATE.kill_current()
@@ -537,6 +988,7 @@ def _start_track(track: dict, record: bool = True) -> dict:
 
 
 def play_next() -> dict:
+    cancel_playlist_load()
     with STATE.lock:
         # If the user went back with "prev", go forward through history first.
         if STATE.history_pos < len(STATE.history) - 1:
@@ -551,6 +1003,7 @@ def play_next() -> dict:
 
 
 def play_prev() -> dict:
+    cancel_playlist_load()
     with STATE.lock:
         if STATE.history_pos <= 0:
             return {"ok": False, "error": "no previous track"}
@@ -560,6 +1013,7 @@ def play_prev() -> dict:
 
 
 def play_index(index: int) -> dict:
+    cancel_playlist_load()
     with STATE.lock:
         if index < 0 or index >= len(STATE.queue):
             return {"ok": False, "error": "bad queue index"}
@@ -948,6 +1402,36 @@ def handle_alice(body: dict) -> dict:
             "Скажи: включи название трека. Ещё умею: пауза, продолжи, дальше, стоп, громче, тише."
         )
 
+    if re.search(r"\b(плейлист|любимые|любимое|понравилось|смотреть позже|watch later)\b", low):
+        ref = ""
+        name = ""
+        if "позже" in low or "watch later" in low:
+            ref, name = "WL", "Смотреть позже"
+        elif "понрав" in low or "любим" in low:
+            ref, name = "LL", "Мне понравилось"
+        else:
+            words = re.sub(
+                r"\b(алиса|включи|включай|поставь|вруби|запусти|плейлист|пожалуйста|мне|мой|мою)\b",
+                " ",
+                low,
+            )
+            words = re.sub(r"\s+", " ", words).strip(" .!?,")
+            for item in load_playlists():
+                nm = str(item.get("name") or "").lower()
+                if nm and (nm in low or (words and (words in nm or nm in words))):
+                    ref = str(item.get("url") or item.get("id") or "")
+                    name = str(item.get("name") or "")
+                    break
+        if ref:
+            r = start_playlist_async(ref, name=name)
+            if r.get("ok"):
+                return alice_reply(f"Включаю плейлист «{name or 'YouTube'}».")
+            return alice_reply(f"Не получилось: {r.get('error', 'ошибка')}")
+        return alice_reply(
+            "Какой плейлист включить? Скажи «включи любимые» "
+            "или «включи смотреть позже»."
+        )
+
     query = strip_query(command)
     if not query:
         return alice_reply("Что включить?")
@@ -1089,6 +1573,53 @@ class Handler(BaseHTTPRequestHandler):
             action = (qs.get("action") or [""])[0]
             self._json(power_action(action))
             return
+        if p == "/api/youtube/status":
+            force = (qs.get("force") or ["0"])[0].lower() in ("1", "true", "yes")
+            quick = (qs.get("quick") or ["0"])[0].lower() in ("1", "true", "yes")
+            self._json(youtube_status(force=force, quick=quick))
+            return
+        if p == "/api/youtube/settings":
+            patch: dict = {}
+            if "browser" in qs:
+                patch["cookies_from_browser"] = (qs.get("browser") or [""])[0]
+            if "cookies_file" in qs:
+                patch["cookies_file"] = (qs.get("cookies_file") or [""])[0]
+            if "js" in qs:
+                patch["js_runtimes"] = (qs.get("js") or [""])[0]
+            if "limit" in qs:
+                patch["playlist_limit"] = (qs.get("limit") or ["50"])[0]
+            if "proxy" in qs:
+                patch["proxy"] = (qs.get("proxy") or [""])[0]
+            self._json(update_youtube_settings(patch))
+            return
+        if p in ("/api/playlist", "/api/play_playlist"):
+            ref = (qs.get("url") or qs.get("id") or [""])[0]
+            name = (qs.get("name") or [""])[0]
+            try:
+                limit = int((qs.get("limit") or ["0"])[0]) or None
+            except ValueError:
+                limit = None
+            save = (qs.get("save") or ["0"])[0].lower() in ("1", "true", "yes")
+            self._json(start_playlist_async(ref, name=name, limit=limit, save=save))
+            return
+        if p == "/api/playlists":
+            self._json(
+                {
+                    "ok": True,
+                    "playlists": load_playlists(),
+                    "current": (STATE.status() or {}).get("playlist"),
+                }
+            )
+            return
+        if p == "/api/playlist_save":
+            ref = (qs.get("url") or qs.get("id") or [""])[0]
+            name = (qs.get("name") or [""])[0]
+            self._json(playlist_save(ref, name))
+            return
+        if p == "/api/playlist_delete":
+            pid = (qs.get("id") or [""])[0]
+            self._json(delete_playlist(pid))
+            return
         if p == "/health":
             self._json({"ok": True, "ytdlp": YTDLP, "pc_ip": PC_IP, "station": STATION_HOST})
             return
@@ -1126,19 +1657,22 @@ def main() -> None:
     print(f"Station: {STATION_USER}@{STATION_HOST}:{STATION_PORT} (mode={PLAYER_MODE})")
 
     # A previous bridge may have left a gst-launch process playing.
-    try:
-        ssh(KILL_GST, timeout=10)
-    except Exception as exc:
-        print(f"gst cleanup: {exc}")
+    # BRIDGE_NO_STATION_INIT=1 is useful for testing the web/API layer
+    # without touching a station that is currently playing.
+    if os.environ.get("BRIDGE_NO_STATION_INIT") != "1":
+        try:
+            ssh(KILL_GST, timeout=10)
+        except Exception as exc:
+            print(f"gst cleanup: {exc}")
 
-    # Make the hardware state match the web UI on a bridge restart.
-    try:
-        led_auto()
-    except Exception as exc:
-        print(f"led init: {exc}")
-    with STATE.lock:
-        STATE.amp_on = amp_query()
-        STATE.volume = volume_query()
+        # Make the hardware state match the web UI on a bridge restart.
+        try:
+            led_auto()
+        except Exception as exc:
+            print(f"led init: {exc}")
+        with STATE.lock:
+            STATE.amp_on = amp_query()
+            STATE.volume = volume_query()
 
     audio = ThreadingHTTPServer(("0.0.0.0", HTTP_PORT), Handler)
     skill = ThreadingHTTPServer(("0.0.0.0", SKILL_PORT), Handler)

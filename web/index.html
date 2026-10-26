@@ -154,6 +154,25 @@
   .switch input:checked + .slider:before{transform:translateX(23px)}
   .actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}
   .note{color:var(--muted);font-size:12px;line-height:1.55;margin-top:12px}
+  .yt-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .field{display:flex;flex-direction:column;gap:6px;min-width:0}
+  .field label{font-size:11.5px;color:var(--muted);letter-spacing:.3px}
+  .field input[type=text], .field input[type=number], .field select{
+    width:100%;border:1px solid var(--line);background:rgba(255,255,255,.04);color:var(--text);
+    border-radius:12px;padding:10px 12px;font-size:13px;outline:none;min-width:0
+  }
+  .field input:focus, .field select:focus{border-color:rgba(91,140,255,.55);box-shadow:0 0 0 3px rgba(91,140,255,.12)}
+  .pl-status{font-size:12px;line-height:1.55;color:var(--muted);margin-top:10px}
+  .pl-status.ok{color:var(--good)}
+  .pl-status.bad{color:var(--bad)}
+  .pl-list{display:flex;flex-direction:column;gap:6px;margin-top:6px;max-height:190px;overflow:auto;padding-right:4px}
+  .pl-item{display:flex;align-items:center;gap:9px;padding:9px 10px;border:1px solid var(--line);border-radius:12px;cursor:pointer;background:rgba(255,255,255,.02)}
+  .pl-item:hover{background:rgba(255,255,255,.06)}
+  .pl-name{flex:1;min-width:0;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .pl-meta{font-size:11.5px;color:var(--muted);flex:0 0 auto}
+  .pl-del{border:0;background:transparent;color:var(--muted);cursor:pointer;font-size:16px;padding:2px 5px;border-radius:8px}
+  .pl-del:hover{color:var(--bad);background:rgba(255,92,122,.08)}
+  @media(max-width:600px){.yt-grid{grid-template-columns:1fr}}
   .webhook{display:flex;gap:8px;margin-top:10px}
   .webhook code{
     flex:1;min-width:0;background:rgba(0,0,0,.28);border:1px solid var(--line);border-radius:12px;
@@ -246,6 +265,73 @@
         <div class="queue" id="queue"><div class="empty">Очередь пуста</div></div>
         <div class="statusline"><span class="spinner" id="spinner"></span><span id="statusText"></span></div>
       </section>
+
+      <section class="card">
+        <h2>YouTube: вход и плейлисты</h2>
+        <div class="yt-grid">
+          <div class="field">
+            <label>Cookies из браузера</label>
+            <input id="ytBrowser" list="ytBrowserList" placeholder="firefox" autocomplete="off">
+            <datalist id="ytBrowserList">
+              <option value="firefox">
+              <option value="chromium">
+              <option value="chrome">
+              <option value="edge">
+              <option value="brave">
+              <option value="opera">
+              <option value="vivaldi">
+              <option value="none">
+            </datalist>
+          </div>
+          <div class="field">
+            <label>Или cookies.txt</label>
+            <input id="ytCookiesFile" placeholder="~/cookies.txt" autocomplete="off">
+          </div>
+        </div>
+        <div class="field" style="margin-top:10px">
+          <label>Прокси для YouTube (необязательно)</label>
+          <input id="ytProxy" placeholder="socks5://127.0.0.1:1080" autocomplete="off">
+        </div>
+        <div class="yt-grid" style="margin-top:10px">
+          <div class="field">
+            <label>JS-рантайм</label>
+            <input id="ytJs" placeholder="node" autocomplete="off">
+          </div>
+          <div class="field">
+            <label>Лимит треков в плейлисте</label>
+            <input id="ytLimit" type="number" min="1" max="500" value="50">
+          </div>
+        </div>
+        <div class="actions">
+          <button class="btn" id="ytSave">Сохранить</button>
+          <button class="btn accent" id="ytCheck">Проверить вход</button>
+        </div>
+        <div class="pl-status" id="ytStatus">Проверяю настройки…</div>
+        <div class="note">Вход берётся из cookies браузера на этом компьютере. Войди в YouTube в Firefox/Chrome и выбери браузер. Для приватных плейлистов и «Мне понравилось» нужен вход.</div>
+
+        <div class="field" style="margin-top:14px">
+          <label>Плейлист по ссылке или ID</label>
+          <input id="plUrl" placeholder="https://www.youtube.com/playlist?list=..." autocomplete="off">
+        </div>
+        <div class="yt-grid" style="margin-top:8px">
+          <div class="field">
+            <label>Название (необязательно)</label>
+            <input id="plName" placeholder="Например, Рок" autocomplete="off">
+          </div>
+          <div class="actions" style="margin-top:0;align-items:flex-end">
+            <button class="btn accent" id="plPlay">Играть</button>
+            <button class="btn" id="plSave">Сохранить</button>
+          </div>
+        </div>
+        <div class="actions">
+          <button class="btn" id="plLL">Мне понравилось (LL)</button>
+          <button class="btn" id="plWL">Смотреть позже (WL)</button>
+        </div>
+
+        <div class="queue-head" style="display:flex"><span>Сохранённые плейлисты</span><span id="plCount"></span></div>
+        <div class="pl-list" id="plSaved"><div class="empty">Пока нет сохранённых плейлистов</div></div>
+        <div class="note" id="plNow"></div>
+      </section>
     </div>
 
     <div class="col">
@@ -310,7 +396,7 @@
 <script>window.__INITIAL_STATE__ = null;</script>
 <script>
 const $ = (id) => document.getElementById(id);
-const state = { data:{}, ledEditing:0, volumeTimer:0, ledTimer:0, fails:0, poweringOff:false };
+const state = { data:{}, ledEditing:0, volumeTimer:0, ledTimer:0, fails:0, poweringOff:false, ytLoaded:false };
 
 function fmt(sec){
   sec = Math.max(0, Math.floor(Number(sec)||0));
@@ -353,8 +439,14 @@ function render(d){
     cover.style.display="none"; cover.removeAttribute("src");
   }
   $("title").textContent = tr ? tr.title : (d.downloading ? "Ищу трек…" : "Ничего не играет");
-  $("sub").textContent = tr ? "YouTube · " + (d.player==="gst" ? "прямой поток" : d.player) : "Скажи Алисе «включи …» или найди трек ниже";
+  const pl = d.playlist;
+  const plSuffix = pl && pl.name ? " · " + pl.name : "";
+  $("sub").textContent = tr ? "YouTube · " + (d.player==="gst" ? "прямой поток" : d.player) + plSuffix : "Скажи Алисе «включи …» или найди трек ниже";
   $("eyebrow").textContent = tr ? (d.paused ? "Пауза" : "Сейчас играет") : "Плеер";
+  $("plNow").textContent = pl && pl.id
+    ? (pl.loading ? "Загружаю плейлист: " + (pl.name || pl.id) + "…"
+                  : "Плейлист: " + (pl.name || pl.id) + (pl.count ? " · " + pl.count + " треков" : ""))
+    : "";
 
   const dur = Number(d.duration || (tr && tr.duration) || 0);
   const el = Math.min(Number(d.elapsed||0), dur || 1e9);
@@ -432,6 +524,93 @@ function hexToRgb(hex){
   const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
   return m ? [parseInt(m[1],16),parseInt(m[2],16),parseInt(m[3],16)] : [47,107,255];
 }
+
+function renderSaved(items){
+  const box = $("plSaved");
+  $("plCount").textContent = items.length ? items.length + " сохранено" : "";
+  if(!items.length){
+    box.innerHTML = '<div class="empty">Пока нет сохранённых плейлистов</div>';
+    return;
+  }
+  box.innerHTML = "";
+  items.forEach(item=>{
+    const row = document.createElement("div");
+    row.className = "pl-item";
+    row.title = "Включить плейлист";
+    const name = document.createElement("div");
+    name.className = "pl-name";
+    name.textContent = item.name || item.id;
+    const meta = document.createElement("div");
+    meta.className = "pl-meta";
+    meta.textContent = item.count ? item.count + " треков" : "";
+    const del = document.createElement("button");
+    del.className = "pl-del";
+    del.title = "Удалить из сохранённых";
+    del.textContent = "×";
+    del.onclick = (e)=>{ e.stopPropagation(); deleteSaved(item); };
+    row.append(name, meta, del);
+    row.onclick = ()=> playPlaylist(item.url || item.id, item.name || "");
+    box.append(row);
+  });
+}
+
+async function loadYouTube(opts){
+  opts = opts || {};
+  const qs = new URLSearchParams();
+  if(opts.quick) qs.set("quick","1");
+  if(opts.force) qs.set("force","1");
+  try{
+    const d = await api("/api/youtube/status" + (qs.toString() ? "?" + qs.toString() : ""));
+    state.youtube = d;
+    $("ytBrowser").value = (d.settings && d.settings.cookies_from_browser) || "";
+    $("ytCookiesFile").value = (d.settings && d.settings.cookies_file) || "";
+    $("ytJs").value = (d.settings && d.settings.js_runtimes) || "";
+    $("ytLimit").value = (d.settings && d.settings.playlist_limit) || 50;
+    $("ytProxy").value = (d.settings && d.settings.proxy) || "";
+    const st = $("ytStatus");
+    st.textContent = d.message || (d.logged_in ? "Вход работает." : "Вход не проверен.");
+    st.className = "pl-status " + (d.logged_in === true ? "ok" : (d.logged_in === false ? "bad" : ""));
+    renderSaved(d.playlists || []);
+    state.ytLoaded = true;
+  }catch(e){
+    $("ytStatus").textContent = "API входа недоступен: " + e.message;
+    $("ytStatus").className = "pl-status bad";
+  }
+}
+
+async function playPlaylist(ref, name){
+  ref = String(ref || "").trim();
+  if(!ref){ $("plUrl").focus(); return; }
+  try{
+    const qs = new URLSearchParams();
+    qs.set("url", ref);
+    if(name) qs.set("name", name);
+    const r = await api("/api/playlist?" + qs.toString());
+    if(r.ok){ toast("Загружаю плейлист…"); refresh(); }
+    else toast(r.error || "Не удалось включить плейлист");
+  }catch(e){ toast("Ошибка: " + e.message); }
+}
+
+async function savePlaylist(ref, name){
+  ref = String(ref || "").trim();
+  try{
+    const qs = new URLSearchParams();
+    if(ref) qs.set("url", ref);
+    if(name) qs.set("name", name);
+    const r = await api("/api/playlist_save" + (qs.toString() ? "?" + qs.toString() : ""));
+    if(r.ok){ toast("Плейлист сохранён"); renderSaved(r.playlists || []); loadYouTube({quick:true}); }
+    else toast(r.error || "Не удалось сохранить плейлист");
+  }catch(e){ toast("Ошибка: " + e.message); }
+}
+
+async function deleteSaved(item){
+  if(!confirm("Удалить «" + (item.name || item.id) + "» из сохранённых?")) return;
+  try{
+    const r = await api("/api/playlist_delete?id=" + encodeURIComponent(item.id));
+    if(r.ok){ toast("Удалено"); renderSaved(r.playlists || []); loadYouTube({quick:true}); }
+    else toast(r.error || "Не удалось удалить");
+  }catch(e){ toast("Ошибка: " + e.message); }
+}
 async function act(path, msg){
   try{ await api(path); if(msg) toast(msg); refresh(); }
   catch(e){ toast("Не получилось: " + e.message); }
@@ -456,6 +635,14 @@ $("searchForm").addEventListener("submit", async (e)=>{
   e.preventDefault();
   const q = $("q").value.trim();
   if(!q) return;
+  const isPlaylist = /(?:[?&]list=|^(?:LL|WL)$|^PL[A-Za-z0-9_-]{10,}$)/i.test(q);
+  if(isPlaylist){
+    $("searchBtn").disabled = true;
+    await playPlaylist(q, "");
+    $("searchBtn").disabled = false;
+    $("q").value = "";
+    return;
+  }
   $("searchBtn").disabled = true;
   try{
     const r = await api("/api/play?q=" + encodeURIComponent(q));
@@ -514,6 +701,44 @@ $("copyWebhook").onclick = async ()=>{
   catch(e){ toast(text); }
   ta.remove();
 };
+
+$("ytSave").onclick = async ()=>{
+  const btn = $("ytSave");
+  btn.disabled = true;
+  const qs = new URLSearchParams({
+    browser: $("ytBrowser").value.trim(),
+    cookies_file: $("ytCookiesFile").value.trim(),
+    js: $("ytJs").value.trim(),
+    limit: $("ytLimit").value || "50",
+    proxy: $("ytProxy").value.trim()
+  });
+  try{
+    const r = await api("/api/youtube/settings?" + qs.toString());
+    if(r.ok){ toast("Настройки сохранены"); await loadYouTube({quick:true}); }
+    else toast(r.error || "Не удалось сохранить");
+  }catch(e){ toast("Ошибка: " + e.message); }
+  finally{ btn.disabled = false; }
+};
+
+$("ytCheck").onclick = async ()=>{
+  const btn = $("ytCheck");
+  btn.disabled = true;
+  toast("Проверяю вход…");
+  try{ await loadYouTube({force:true}); }
+  finally{ btn.disabled = false; }
+};
+
+$("plPlay").onclick = ()=> playPlaylist($("plUrl").value.trim(), $("plName").value.trim());
+$("plSave").onclick = async ()=>{
+  const btn = $("plSave");
+  btn.disabled = true;
+  try{ await savePlaylist($("plUrl").value.trim(), $("plName").value.trim()); }
+  finally{ btn.disabled = false; }
+};
+$("plLL").onclick = ()=> playPlaylist("LL", "Мне понравилось");
+$("plWL").onclick = ()=> playPlaylist("WL", "Смотреть позже");
+
+loadYouTube({quick:true});
 
 if (window.__INITIAL_STATE__) { state.data = window.__INITIAL_STATE__; render(state.data); }
 refresh();
