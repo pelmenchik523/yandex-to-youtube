@@ -1,6 +1,7 @@
 settings.json
 playlists.json
 cookies.txt
+station.env
 *.tmp
 __pycache__/
 cache/

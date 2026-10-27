@@ -58,6 +58,12 @@ DEFAULT_SETTINGS = {
     "playlist_limit": 50,
     # Optional: http://host:port or socks5://host:port for blocked YouTube.
     "proxy": "",
+    # Playlist started when the skill is opened without a command.
+    "default_playlist": "",
+    # Used to strip "запусти навык <name>" from Alice commands.
+    "skill_name": "ютуб",
+    # Plan B: intercept the Station's native Alice music and play YouTube.
+    "native_watch": True,
 }
 
 PLAYLIST_NAMES = {
@@ -98,20 +104,34 @@ def save_settings(patch: dict) -> dict:
     return data
 
 
+def as_bool(value, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in ("", "0", "false", "off", "no")
+
+
 def public_settings(settings: dict | None = None) -> dict:
     s = settings or load_settings()
     cfile = str(s.get("cookies_file") or "").strip()
+    browser = str(s.get("cookies_from_browser") or "").strip()
+    cfile_exists = bool(cfile) and Path(cfile).expanduser().exists()
     try:
         limit = int(s.get("playlist_limit") or 50)
     except (TypeError, ValueError):
         limit = 50
     return {
-        "cookies_from_browser": str(s.get("cookies_from_browser") or ""),
+        "cookies_from_browser": browser,
         "cookies_file": cfile,
-        "cookies_file_exists": bool(cfile) and Path(cfile).expanduser().exists(),
+        "cookies_file_exists": cfile_exists,
+        "login_source": "file" if cfile_exists else ("browser" if browser and browser != "none" else ""),
         "js_runtimes": str(s.get("js_runtimes") or ""),
         "playlist_limit": limit,
         "proxy": str(s.get("proxy") or ""),
+        "default_playlist": str(s.get("default_playlist") or ""),
+        "skill_name": str(s.get("skill_name") or ""),
+        "native_watch": as_bool(s.get("native_watch"), True),
     }
 
 
@@ -128,6 +148,10 @@ def update_youtube_settings(patch: dict) -> dict:
         "js_runtimes",
         "playlist_limit",
         "proxy",
+        "default_playlist",
+        "skill_name",
+        "native_watch",
+        "native_auto_next",
     }
     clean: dict = {}
     for key, value in patch.items():
@@ -138,6 +162,8 @@ def update_youtube_settings(patch: dict) -> dict:
                 clean[key] = max(1, min(500, int(value)))
             except (TypeError, ValueError):
                 continue
+        elif key in ("native_watch", "native_auto_next"):
+            clean[key] = as_bool(value)
         else:
             clean[key] = str(value or "").strip()
     data = save_settings(clean)
@@ -158,7 +184,7 @@ def ytdlp_cookie_args(settings: dict | None = None) -> list[str]:
     return []
 
 
-def ytdlp_base(settings: dict | None = None) -> list[str]:
+def ytdlp_base(settings: dict | None = None, include_cookies: bool = True) -> list[str]:
     """Common yt-dlp arguments: JS challenge solver + YouTube cookies."""
     s = settings or load_settings()
     args = [YTDLP, "--no-warnings", "--force-ipv4"]
@@ -168,12 +194,23 @@ def ytdlp_base(settings: dict | None = None) -> list[str]:
     js = str(s.get("js_runtimes") or "").strip()
     if js:
         args += ["--js-runtimes", js]
-    args += ytdlp_cookie_args(s)
+    if include_cookies:
+        args += ytdlp_cookie_args(s)
     return args
 
 
 def current_public_url() -> str:
-    """Return the newest localhost.run URL from its log, if available."""
+    """Public base URL of the skill webhook.
+
+    Priority: explicit "public_url" setting (the stable Tailscale Funnel
+    address), then the newest localhost.run URL from its log.
+    """
+    try:
+        fixed = str(load_settings().get("public_url") or "").strip().rstrip("/")
+        if fixed:
+            return fixed
+    except Exception:
+        pass
     try:
         log = (BASE / "localhostrun.log").read_text(encoding="utf-8", errors="ignore")
         urls = re.findall(r"https://[a-z0-9]+\.lhr\.life", log)
@@ -198,6 +235,7 @@ def lan_ip() -> str:
 
 PC_IP = os.environ.get("PC_IP") or lan_ip()
 
+SSH_CTL = os.path.expanduser("~/.ssh/ytstation-ctl")
 SSH_BASE = [
     "ssh",
     "-T",
@@ -206,6 +244,9 @@ SSH_BASE = [
     "-o", "StrictHostKeyChecking=no",
     "-o", "UserKnownHostsFile=/dev/null",
     "-o", "ConnectTimeout=6",
+    "-o", "ControlMaster=auto",
+    "-o", f"ControlPath={SSH_CTL}",
+    "-o", "ControlPersist=600",
     f"{STATION_USER}@{STATION_HOST}",
 ]
 
@@ -257,6 +298,7 @@ class State:
     def kill_current(self) -> None:
         """Stop the current GStreamer process but keep queue/history."""
         with self.lock:
+            old_pid = self.pid
             self.generation += 1
             self.paused = False
             self.ducked = False
@@ -266,8 +308,19 @@ class State:
             self.pause_started = None
             self.paused_total = 0.0
             self.duration = 0.0
-        # kill only our gst-launch processes, never the main daemons
-        ssh(KILL_GST, timeout=10)
+        # Kill only the process we started.  Scanning /proc for every
+        # gst-launch takes ~1.5 s on the Station and delays every track start.
+        if old_pid:
+            try:
+                ssh(
+                    f"pid={old_pid}; "
+                    "c=$(tr '\\0' ' ' < /proc/$pid/cmdline 2>/dev/null); "
+                    'case "$c" in *"maind --gst-launch"*) kill -KILL $pid 2>/dev/null;; esac; '
+                    "true",
+                    timeout=8,
+                )
+            except Exception:
+                pass
 
     def stop(self) -> None:
         cancel_playlist_load()
@@ -536,8 +589,77 @@ def delete_playlist(playlist_id: str) -> dict:
         return {"ok": False, "error": "Не указан плейлист."}
     items = [x for x in load_playlists() if x.get("id") != pid]
     _write_playlists(items)
+    setting = str(load_settings().get("default_playlist") or "").strip()
+    if setting and setting == pid:
+        save_settings({"default_playlist": items[0]["id"] if items else ""})
     _invalidate_yt_status()
     return {"ok": True, "playlists": items}
+
+
+def default_playlist_item() -> dict | None:
+    """Playlist Alice starts when the skill is opened without a command.
+
+    The setting can hold a saved id, a URL, or a name; an empty setting means
+    "the first saved playlist".
+    """
+    saved = load_playlists()
+    ref = str(load_settings().get("default_playlist") or "").strip()
+    if not ref:
+        return saved[0] if saved else None
+    low = ref.lower()
+    for item in saved:
+        if low in (item["id"].lower(), item["url"].lower(), item["name"].lower()):
+            return item
+    url = ref if ref.startswith("http") else f"https://www.youtube.com/playlist?list={ref}"
+    return {"id": ref, "url": url, "name": "", "count": 0, "added": 0}
+
+
+def _probe_youtube_login(
+    settings: dict,
+    extra_cookie_args: list[str] | None = None,
+) -> tuple[bool, str]:
+    """Ask yt-dlp whether the current session can see private YouTube data."""
+    base = ytdlp_base(settings, include_cookies=extra_cookie_args is None)
+    if extra_cookie_args:
+        base += extra_cookie_args
+
+    ll_cmd = base + [
+        "--flat-playlist",
+        "--playlist-end", "1",
+        "--print", "%(id)s\t%(playlist_title)s",
+        "https://www.youtube.com/playlist?list=LL",
+    ]
+    try:
+        proc = subprocess.run(ll_cmd, capture_output=True, text=True, timeout=60)
+        lines = [line for line in (proc.stdout or "").splitlines() if line.strip()]
+        if proc.returncode == 0 and lines:
+            return True, "Вход работает: плейлист «Мне понравилось» доступен."
+
+        feed_cmd = base + [
+            "--flat-playlist",
+            "--playlist-end", "5",
+            "--print", "%(id)s\t%(title)s",
+            "https://www.youtube.com/feed/playlists",
+        ]
+        feed = subprocess.run(feed_cmd, capture_output=True, text=True, timeout=60)
+        feed_lines = [line for line in (feed.stdout or "").splitlines() if line.strip()]
+        if feed.returncode == 0 and feed_lines:
+            return True, "Вход работает: YouTube отдал список плейлистов."
+
+        err = ((proc.stderr or "") + "\n" + (feed.stderr or "")).strip()
+        low = err.lower()
+        if any(word in low for word in ("private", "sign in", "login", "cookies")):
+            return (
+                False,
+                "YouTube не отдал приватный плейлист. "
+                "Проверь, что ты вошёл в YouTube в браузере на этом компьютере.",
+            )
+        last = err.splitlines()[-1][:300] if err else "yt-dlp вернул пустой ответ"
+        return False, f"Не удалось проверить вход: {last}"
+    except subprocess.TimeoutExpired:
+        return False, "Проверка входа не успела за 60 секунд."
+    except Exception as exc:
+        return False, f"Ошибка проверки входа: {exc}"
 
 
 def youtube_status(force: bool = False, quick: bool = False) -> dict:
@@ -560,9 +682,12 @@ def youtube_status(force: bool = False, quick: bool = False) -> dict:
         if cached and now - float(YT_STATUS_CACHE.get("at") or 0) < 300:
             result["logged_in"] = cached.get("logged_in")
             result["message"] = cached.get("message") or ""
+        elif not ytdlp_cookie_args(settings):
+            result["logged_in"] = False
+            result["message"] = "Аккаунт не подключён: нажми «Войти»."
         else:
             result["logged_in"] = None
-            result["message"] = "Нажми «Проверить вход», чтобы проверить cookies."
+            result["message"] = "Нажми «Проверить», чтобы проверить вход."
         return result
 
     if not os.path.exists(YTDLP):
@@ -571,88 +696,264 @@ def youtube_status(force: bool = False, quick: bool = False) -> dict:
         YT_STATUS_CACHE.update({"at": now, "data": result})
         return result
     if not ytdlp_cookie_args(settings):
-        result["message"] = (
-            "Cookies не настроены: войди в YouTube в браузере на этом ПК "
-            "и укажи браузер либо путь к cookies.txt."
-        )
+        result["message"] = "Аккаунт не подключён: нажми «Войти» в блоке YouTube."
         YT_STATUS_CACHE.update({"at": now, "data": result})
         return result
 
-    ll_cmd = ytdlp_base(settings) + [
-        "--flat-playlist",
-        "--playlist-end", "1",
-        "--print", "%(id)s\t%(playlist_title)s",
-        "https://www.youtube.com/playlist?list=LL",
-    ]
-    try:
-        proc = subprocess.run(ll_cmd, capture_output=True, text=True, timeout=60)
-        lines = [line for line in (proc.stdout or "").splitlines() if line.strip()]
-        if proc.returncode == 0 and lines:
-            result["logged_in"] = True
-            result["message"] = "Вход работает: плейлист «Мне понравилось» доступен."
-        else:
-            feed_cmd = ytdlp_base(settings) + [
-                "--flat-playlist",
-                "--playlist-end", "5",
-                "--print", "%(id)s\t%(title)s",
-                "https://www.youtube.com/feed/playlists",
-            ]
-            feed = subprocess.run(feed_cmd, capture_output=True, text=True, timeout=60)
-            feed_lines = [line for line in (feed.stdout or "").splitlines() if line.strip()]
-            if feed.returncode == 0 and feed_lines:
-                result["logged_in"] = True
-                result["message"] = "Вход работает: YouTube отдал список плейлистов."
-            else:
-                err = ((proc.stderr or "") + "\n" + (feed.stderr or "")).strip()
-                low = err.lower()
-                if any(word in low for word in ("private", "sign in", "login", "cookies")):
-                    result["message"] = (
-                        "YouTube не отдал приватный плейлист. "
-                        "Проверь, что ты вошёл в выбранном браузере."
-                    )
-                else:
-                    last = err.splitlines()[-1][:300] if err else "yt-dlp вернул пустой ответ"
-                    result["message"] = f"Не удалось проверить вход: {last}"
-    except subprocess.TimeoutExpired:
-        result["message"] = "Проверка входа не успела за 60 секунд."
-    except Exception as exc:
-        result["message"] = f"Ошибка проверки входа: {exc}"
-
+    logged_in, message = _probe_youtube_login(settings)
+    result["logged_in"] = logged_in
+    result["message"] = message
     YT_STATUS_CACHE.update({"at": now, "data": result})
     return result
 
 
+def ytdlp_python() -> str | None:
+    """Python interpreter of the yt-dlp venv (used to export browser cookies)."""
+    path = Path(YTDLP)
+    venv_py = path.parent / "python"
+    if venv_py.exists():
+        return str(venv_py)
+    try:
+        first = path.read_text(encoding="utf-8", errors="ignore").splitlines()[0]
+        if first.startswith("#!"):
+            exe = first[2:].strip().split()[0]
+            if Path(exe).exists():
+                return exe
+    except OSError:
+        pass
+    return None
+
+
+def _cookie_file_has_youtube_auth(path: Path) -> bool:
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+    for line in text.splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) < 7:
+            continue
+        domain, name = parts[0].lower(), parts[5]
+        if "youtube.com" in domain and name in (
+            "SID",
+            "SAPISID",
+            "__Secure-1PSID",
+            "__Secure-3PSID",
+        ):
+            return True
+    return False
+
+
+def youtube_login_open() -> dict:
+    """Open the YouTube login page in the browser on this computer."""
+    url = (
+        "https://accounts.google.com/ServiceLogin?service=youtube"
+        "&continue=https%3A%2F%2Fwww.youtube.com%2F"
+    )
+    env = os.environ.copy()
+    runtime = Path(f"/run/user/{os.getuid()}")
+    env.setdefault("XDG_RUNTIME_DIR", str(runtime))
+    if runtime.exists():
+        bus = runtime / "bus"
+        if bus.exists():
+            env.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path={bus}")
+        wayland = sorted(runtime.glob("wayland-*"))
+        if wayland:
+            env.setdefault("WAYLAND_DISPLAY", wayland[0].name)
+    if not env.get("DISPLAY") and not env.get("WAYLAND_DISPLAY"):
+        env["DISPLAY"] = ":1"
+    attempts: list[str] = []
+    for name, rest in (("xdg-open", [url]), ("firefox", [url])):
+        exe = shutil.which(name)
+        if not exe:
+            attempts.append(f"{name}: не найден")
+            continue
+        try:
+            proc = subprocess.Popen(
+                [exe, *rest],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            try:
+                code = proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                code = 0
+            if code == 0:
+                return {"ok": True, "opened": True, "url": url, "browser": name}
+            attempts.append(f"{name}: код {code}")
+        except Exception as exc:
+            attempts.append(f"{name}: {exc}")
+    return {
+        "ok": False,
+        "opened": False,
+        "url": url,
+        "error": "; ".join(attempts) or "не удалось открыть браузер",
+    }
+
+
+def youtube_login_import() -> dict:
+    """Export the YouTube session from the browser into a private cookie file."""
+    settings = load_settings()
+    browser = str(settings.get("cookies_from_browser") or "").strip()
+    if not browser or browser == "none":
+        browser = "firefox"
+    browser_name, _, profile = browser.partition(":")
+    py = ytdlp_python()
+    if not py:
+        return {"ok": False, "error": "Не удалось найти Python из окружения yt-dlp."}
+
+    COOKIES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = COOKIES_FILE.with_name(COOKIES_FILE.name + ".tmp")
+    script = (
+        "import sys\n"
+        "from yt_dlp.cookies import extract_cookies_from_browser\n"
+        "profile = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else None\n"
+        "jar = extract_cookies_from_browser(sys.argv[1], profile)\n"
+        "jar.save(sys.argv[3], ignore_discard=True, ignore_expires=True)\n"
+    )
+    try:
+        proc = subprocess.run(
+            [py, "-c", script, browser_name, profile, str(tmp)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "Не удалось прочитать cookies: таймаут."}
+    except Exception as exc:
+        return {"ok": False, "error": f"Не удалось прочитать cookies: {exc}"}
+
+    if proc.returncode != 0 or not tmp.exists():
+        err = ((proc.stderr or "") + "\n" + (proc.stdout or "")).strip().splitlines()
+        last = err[-1][:300] if err else "неизвестная ошибка"
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return {"ok": False, "error": f"Браузер {browser}: {last}"}
+
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        pass
+
+    if not _cookie_file_has_youtube_auth(tmp):
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return {
+            "ok": False,
+            "error": "В браузере нет входа в YouTube. Войди в аккаунт и нажми «Я вошёл» ещё раз.",
+        }
+
+    ok, message = _probe_youtube_login(settings, extra_cookie_args=["--cookies", str(tmp)])
+    if not ok:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return {"ok": False, "error": message}
+
+    try:
+        os.replace(tmp, COOKIES_FILE)
+        os.chmod(COOKIES_FILE, 0o600)
+    except OSError as exc:
+        return {"ok": False, "error": f"Не удалось сохранить cookies: {exc}"}
+
+    save_settings({"cookies_file": str(COOKIES_FILE), "cookies_from_browser": ""})
+    _invalidate_yt_status()
+    result = {
+        "ok": True,
+        "logged_in": True,
+        "message": message,
+        "settings": public_settings(load_settings()),
+        "playlists": load_playlists(),
+    }
+    YT_STATUS_CACHE.update({"at": time.time(), "data": result})
+    return {"ok": True, "message": "Аккаунт подключён.", "status": result}
+
+
+def youtube_logout() -> dict:
+    """Stop using the current account and remove the managed cookie file."""
+    settings = load_settings()
+    removed = False
+    cfile = str(settings.get("cookies_file") or "").strip()
+    for raw in {cfile, str(COOKIES_FILE)}:
+        if not raw:
+            continue
+        path = Path(raw).expanduser()
+        try:
+            if path.exists() and path.is_file():
+                path.unlink()
+                removed = True
+        except OSError:
+            pass
+    save_settings({"cookies_file": "", "cookies_from_browser": ""})
+    _invalidate_yt_status()
+    return {"ok": True, "removed": removed}
+
+
+AUDIO_EXTS = (".m4a", ".mp4", ".mp3", ".webm", ".opus", ".ogg")
+
+
 def download(video_id: str) -> Path:
-    target = CACHE / f"{video_id}.mp3"
-    if target.exists() and target.stat().st_size > 1024:
-        return target
+    """Fetch the original audio stream; no MP3 transcode (saves ~15 s).
+
+    The Station's playbin decodes AAC (m4a) and Opus (webm) directly, so the
+    downloaded file is served as-is.
+    """
+    for ext in AUDIO_EXTS:
+        target = CACHE / f"{video_id}{ext}"
+        if target.exists() and target.stat().st_size > 1024:
+            return target
     outtmpl = str(CACHE / "%(id)s.%(ext)s")
     cmd = ytdlp_base() + [
         "--no-playlist",
-        "-f", "bestaudio/best",
-        "-x",
-        "--audio-format", "mp3",
-        "--audio-quality", "192K",
+        "--retries", "5",
+        "--fragment-retries", "5",
+        "--socket-timeout", "20",
+        "-f", "bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio",
         "-o", outtmpl,
         f"https://www.youtube.com/watch?v={video_id}",
     ]
-    proc = subprocess.run(
-        cmd,
-        timeout=600,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    if proc.returncode != 0:
+    last = "yt-dlp download failed"
+    for attempt in range(3):
+        proc = subprocess.run(
+            cmd,
+            timeout=600,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if proc.returncode == 0:
+            break
         err = (proc.stderr or "").strip().splitlines()
-        raise RuntimeError(err[-1][:300] if err else "yt-dlp download failed")
-    if not target.exists():
-        # yt-dlp may have produced a different extension if ffmpeg failed
-        candidates = sorted(CACHE.glob(f"{video_id}.*"), key=lambda p: p.stat().st_mtime, reverse=True)
-        if not candidates:
-            raise RuntimeError("download produced no file")
-        target = candidates[0]
-    return target
+        last = err[-1][:300] if err else "yt-dlp download failed"
+        transient = any(
+            token in last
+            for token in (
+                "405", "403", "429", "timed out", "timeout",
+                "Connection", "Incomplete", "unable to download",
+            )
+        )
+        if attempt < 2 and transient:
+            print(f"yt-dlp: retry {video_id} after: {last[:120]}", flush=True)
+            time.sleep(1.5 * (attempt + 1))
+            continue
+        raise RuntimeError(last)
+    else:
+        raise RuntimeError(last)
+    candidates = [
+        p for p in CACHE.glob(f"{video_id}.*") if p.suffix.lower() in AUDIO_EXTS
+    ]
+    if not candidates:
+        raise RuntimeError("download produced no file")
+    return sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True)[0]
 
 
 def _play_file(path: Path, track: dict, record: bool = True) -> None:
@@ -661,8 +962,7 @@ def _play_file(path: Path, track: dict, record: bool = True) -> None:
 
     if PLAYER_MODE == "gst":
         remote = (
-            f"{KILL_GST}; "
-            "sleep 0.3; "
+            "sleep 0.2; "
             f"nohup {STATION_GST} \"playbin uri={url}\" "
             ">/tmp/ytstation_play.log 2>&1 & echo $!"
         )
@@ -710,7 +1010,23 @@ def _auto_next(gen: int) -> None:
             threading.Timer(remaining + 1.0, _auto_next, args=(gen,)).start()
             return
         if STATE.queue_pos >= len(STATE.queue):
-            return
+            if STATE.track and STATE.track.get("native_id"):
+                native_continue = True
+            else:
+                return
+        else:
+            native_continue = False
+    if native_continue:
+        # A native request: ask Alice for the next track of the same context,
+        # then the log watcher will resolve and play it from YouTube.  Off by
+        # default: the next track needs 4-20 s to prepare.
+        try:
+            enabled = as_bool(load_settings().get("native_auto_next"), False)
+        except Exception:
+            enabled = False
+        if enabled:
+            native_text_query("следующий трек")
+        return
     play_next()
 
 
@@ -1305,8 +1621,16 @@ def serve_audio(handler: BaseHTTPRequestHandler, path: Path) -> None:
             status = 206
 
     length = end - start + 1
+    ctype = {
+        ".mp3": "audio/mpeg",
+        ".m4a": "audio/mp4",
+        ".mp4": "audio/mp4",
+        ".webm": "audio/webm",
+        ".opus": "audio/ogg",
+        ".ogg": "audio/ogg",
+    }.get(path.suffix.lower(), "application/octet-stream")
     handler.send_response(status)
-    handler.send_header("Content-Type", "audio/mpeg")
+    handler.send_header("Content-Type", ctype)
     handler.send_header("Content-Length", str(length))
     handler.send_header("Accept-Ranges", "bytes")
     if status == 206:
@@ -1337,20 +1661,88 @@ def strip_query(command: str) -> str:
     q = command.lower().strip(" .!?,")
     q = re.sub(r"^(алиса[,\s]+)?", "", q)
     q = re.sub(r"^(пожалуйста[,\s]+)?", "", q)
-    q = re.sub(r"^(включи|включай|поставь|вруби|запусти|играй|найди|сыграй)\s+", "", q)
+    q = re.sub(
+        r"^(включи|включай|поставь|вруби|запусти|играй|найди|сыграй|давай|давай-ка)\s+",
+        "",
+        q,
+    )
     q = re.sub(r"^(на\s+)?(ютубе|ютьюбе|youtube|ютубе|ютуб)\s+", "", q)
     q = re.sub(r"^(песню|трек|композицию|музыку)\s+", "", q)
     q = re.sub(r"\s+(на\s+)?(ютубе|ютьюбе|youtube)$", "", q)
     return q.strip(" .!?,")
 
 
+# "Алиса, запусти навык ютуб", "спроси ютуб ...", "сыграем в ютуб".
+_SKILL_LAUNCH_RES = (
+    re.compile(
+        r"^(?:алиса[,\s]+)?(?:запусти|открой|включи|вруби)\s+"
+        r"(?:навык|чат\s+с|скилл)\s*(.*)$"
+    ),
+    re.compile(r"^(?:алиса[,\s]+)?навык\s+(.*)$"),
+    re.compile(r"^(?:алиса[,\s]+)?(?:давай\s+поиграем|сыграем|поиграем)\s+в\s+(.*)$"),
+    re.compile(r"^(?:алиса[,\s]+)?(?:спроси|скажи|узнай|попроси)(?:\s+у)?\s+(.*)$"),
+)
+
+# Phrases that mean "just start the default playlist".
+_DEFAULT_QUERIES = {
+    "музыку",
+    "музыка",
+    "музыки",
+    "что-нибудь",
+    "что нибудь",
+    "ютуб",
+    "ютьюб",
+    "youtube",
+    "основной плейлист",
+    "основное",
+}
+
+
+def strip_skill_prefix(text: str) -> str:
+    """Drop the activation wrapper so "запусти навык ютуб" becomes empty."""
+    low = text.lower().strip(" .!?,")
+    for rx in _SKILL_LAUNCH_RES:
+        m = rx.match(low)
+        if not m:
+            continue
+        rest = m.group(1).strip(" .!?,")
+        names = {
+            str(load_settings().get("skill_name") or "").strip().lower(),
+            "ютуб",
+            "ютьюб",
+            "youtube",
+        }
+        words = rest.split()
+        while words and words[0].strip(" .,!?") in names:
+            words.pop(0)
+        return " ".join(words).strip(" .!?,")
+    return low
+
+
+def start_default_playlist_reply(prefix: str = "Включаю") -> dict:
+    item = default_playlist_item()
+    if not item:
+        return alice_reply(
+            "Скажи, что включить. Например: включи Моргенштерна, "
+            "или включи любимые."
+        )
+    r = start_playlist_async(item["url"], name=item.get("name") or "")
+    if not r.get("ok"):
+        return alice_reply(f"Не получилось: {r.get('error', 'ошибка')}")
+    name = item.get("name") or "YouTube"
+    return alice_reply(f"{prefix} плейлист «{name}».")
+
+
 def handle_alice(body: dict) -> dict:
     req = body.get("request") or {}
     command = (req.get("command") or req.get("original_utterance") or "").strip()
-    low = command.lower()
+    low = strip_skill_prefix(command) if command else ""
 
-    if not command:
-        return alice_reply("Скажи, что включить. Например: включи Моргенштерна.")
+    if re.search(r"\b(выйти|выйди|выход|закрой навык|закончи|закончить|отключись)\b", low):
+        return alice_reply("Выхожу. Музыка продолжит играть.", end=True)
+
+    if not low:
+        return start_default_playlist_reply()
 
     if re.search(r"\b(стоп|останови|выключи|хватит)\b", low):
         STATE.stop()
@@ -1403,6 +1795,8 @@ def handle_alice(body: dict) -> dict:
         )
 
     if re.search(r"\b(плейлист|любимые|любимое|понравилось|смотреть позже|watch later)\b", low):
+        if re.search(r"\bосновн\w*\b", low):
+            return start_default_playlist_reply()
         ref = ""
         name = ""
         if "позже" in low or "watch later" in low:
@@ -1432,14 +1826,901 @@ def handle_alice(body: dict) -> dict:
             "или «включи смотреть позже»."
         )
 
-    query = strip_query(command)
-    if not query:
-        return alice_reply("Что включить?")
+    query = strip_query(low)
+    if not query or query in _DEFAULT_QUERIES:
+        return start_default_playlist_reply()
 
     r = start_query_async(query)
     if not r.get("ok"):
         return alice_reply("Не понял, что включить. Повтори название трека.")
     return alice_reply("Ищу и включаю.")
+
+
+# ---------------------------------------------------------------------------
+# Plan B: play YouTube instead of the Station's native Alice music
+#
+# The Station's local unbound resolves *.strm.yandex.net to 127.0.0.1, so the
+# native Yandex audio never actually sounds.  platformd still receives the
+# AUDIO_PLAY directive from Alice and writes the Yandex Music track id to
+# maind.log.  We resolve that id to "artist title" through the Music API (via
+# an SSH SOCKS tunnel, because the PC exits through a non-RU VPN and the API
+# answers 451 there), search YouTube and play the result with the same
+# maind --gst-launch path the rest of the bridge uses.
+#
+# Alice's own voice commands keep producing the usual directives ("пауза" =>
+# player_pause, "громче" => volume, "следующий трек" => a new audio_play), so
+# they are mapped onto the bridge playback.
+# ---------------------------------------------------------------------------
+
+NATIVE_LOG = "/data/quasar/daemons_logs/maind.log"
+NATIVE_SOCKS_PORT = 1080
+NATIVE_RE_STREAM = re.compile(r"AUDIO_PLAY streamId=(\d+)")
+NATIVE_RE_DIRECTIVE = re.compile(
+    r"routeDirective \([^)]+\)([a-z_]+)(?:\.[A-Za-z_]+)?\s+via"
+)
+NATIVE_RE_PHRASE = re.compile(r"recognizedPhrase='([^']*)'")
+
+NATIVE: dict = {
+    "token": "",
+    "token_at": 0.0,
+    "prep": {},          # stream id -> preparation dict
+    "last_prefetch": "",
+    "last_prefetch_at": 0.0,
+    "handled": {},       # stream id -> time.time() when playback started
+    "socks_at": 0.0,
+    "activating": "",
+    "self_pause_until": 0.0,
+    "continue_until": 0.0,
+    "continuing": {},    # stream id -> time until the native restart is ignored
+    "local_switch_until": 0.0,  # next/prev handled locally; ignore native start
+    "suppress_until": 0.0,      # debounce for native_suppress
+    "voice": None,       # last recognised voice request
+    "voice_timer": None,
+}
+NATIVE_LOCK = threading.RLock()
+
+NATIVE_CLI: dict = {"proc": None, "ready": None, "prompt": None}
+NATIVE_CLI_LOCK = threading.Lock()
+
+
+NATIVE_MEDIA: dict = {"pid": 0, "at": 0.0}
+
+NATIVE_SETTING: dict = {"value": True, "at": 0.0}
+
+
+def native_setting() -> bool:
+    now = time.time()
+    if now - float(NATIVE_SETTING["at"]) < 2.0:
+        return bool(NATIVE_SETTING["value"])
+    try:
+        value = as_bool(load_settings().get("native_watch"), True)
+    except Exception:
+        value = True
+    NATIVE_SETTING["value"] = value
+    NATIVE_SETTING["at"] = now
+    return value
+
+
+def native_socks() -> bool:
+    """Make sure the SSH SOCKS proxy through the Station (RU exit) is up."""
+    try:
+        socket.create_connection(("127.0.0.1", NATIVE_SOCKS_PORT), timeout=0.4).close()
+        return True
+    except OSError:
+        pass
+    with NATIVE_LOCK:
+        if time.time() - NATIVE["socks_at"] < 4:
+            return False
+        NATIVE["socks_at"] = time.time()
+    cmd = [
+        "ssh", "-T", "-f", "-N",
+        "-p", str(STATION_PORT),
+        "-o", "BatchMode=yes",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "ConnectTimeout=8",
+        "-o", "ServerAliveInterval=30",
+        "-o", "ExitOnForwardFailure=yes",
+        "-D", f"127.0.0.1:{NATIVE_SOCKS_PORT}",
+        f"{STATION_USER}@{STATION_HOST}",
+    ]
+    try:
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=12)
+    except Exception:
+        return False
+    for _ in range(20):
+        try:
+            socket.create_connection(("127.0.0.1", NATIVE_SOCKS_PORT), timeout=0.3).close()
+            return True
+        except OSError:
+            time.sleep(0.1)
+    return False
+
+
+def native_token(force: bool = False) -> str:
+    now = time.time()
+    with NATIVE_LOCK:
+        if not force and NATIVE["token"] and now - NATIVE["token_at"] < 1800:
+            return NATIVE["token"]
+    try:
+        proc = ssh("strings -a /data/quasar/account_storage.dat | head -3", timeout=10)
+    except Exception:
+        return ""
+    for line in (proc.stdout or "").splitlines():
+        idx = line.find("y0__")
+        if idx >= 0:
+            tok = line[idx:].strip()
+            with NATIVE_LOCK:
+                NATIVE["token"] = tok
+                NATIVE["token_at"] = now
+            return tok
+    return ""
+
+
+def native_track_info(stream_id: str) -> dict:
+    if not stream_id.isdigit():
+        return {}
+    if not native_socks():
+        print("native: SOCKS tunnel is not available", flush=True)
+        return {}
+    tok = native_token()
+    if not tok:
+        print("native: no Yandex Music token on the Station", flush=True)
+        return {}
+    url = f"https://api.music.yandex.net/tracks/{stream_id}"
+    data: dict = {}
+    for _ in range(2):
+        try:
+            out = subprocess.check_output(
+                [
+                    "curl", "-s", "-m", "12",
+                    "--socks5-hostname", f"127.0.0.1:{NATIVE_SOCKS_PORT}",
+                    "-H", f"Authorization: OAuth {tok}",
+                    url,
+                ],
+                text=True, timeout=16, stderr=subprocess.DEVNULL,
+            )
+            data = json.loads(out or "{}")
+        except Exception:
+            data = {}
+        if isinstance(data, dict) and data.get("result"):
+            break
+        tok = native_token(force=True)
+        if not tok:
+            break
+    try:
+        track = (data.get("result") or [None])[0]
+    except Exception:
+        track = None
+    if not isinstance(track, dict):
+        return {}
+    artists = ", ".join(str(a.get("name") or "") for a in (track.get("artists") or []))
+    return {
+        "title": str(track.get("title") or ""),
+        "artists": artists.strip(", "),
+        "duration": float(track.get("durationMs") or 0) / 1000.0,
+    }
+
+
+def native_pick(items: list[dict], info: dict) -> dict:
+    title = (info.get("title") or "").casefold()
+    want = float(info.get("duration") or 0.0)
+
+    def score(item: dict) -> tuple:
+        name = (item.get("title") or "").casefold()
+        same = 0 if title and title in name else 1
+        dur = float(item.get("duration") or 0.0)
+        diff = abs(dur - want) / want if want and dur else 1.0
+        return (same, round(diff, 2))
+
+    return sorted(items, key=score)[0]
+
+
+NATIVE_MUSIC_VERBS = (
+    "включи", "включить", "поставь", "поставить", "сыграй", "сыграть",
+    "запусти", "запустить", "вруби", "врубить", "найди", "найти",
+)
+NATIVE_QUERY_SKIP = {
+    "музыку", "музыка", "радио", "плейлист", "любимые", "смотреть позже",
+    "новинки", "что-нибудь", "что нибудь", "наугад", "подряд", "дальше",
+    "следующий", "следующую", "следующий трек", "следующую песню",
+    "предыдущий", "предыдущую", "предыдущий трек", "предыдущую песню",
+}
+
+
+def native_music_query(text: str) -> str:
+    """Return the track part of a music request, or "" for other commands."""
+    s = (text or "").strip().strip(".!,")
+    low = s.casefold()
+    verb = ""
+    for word in NATIVE_MUSIC_VERBS:
+        if low == word or low.startswith(word + " "):
+            verb = word
+            s = s[len(word):].strip(" ,.!")
+            break
+    if not verb:
+        return ""
+    for word in ("пожалуйста", "мне", "песню", "песня", "трек", "композицию", "музыку"):
+        low = s.casefold()
+        if low.startswith(word + " "):
+            s = s[len(word):].strip(" ,.!")
+    s = s.strip(" ,.!\"'«»")
+    if not s or s.casefold() in NATIVE_QUERY_SKIP:
+        return ""
+    return s
+
+
+def native_voice_done(reason: str = "") -> None:
+    """Alice found a track: cancel the YouTube fallback for this request."""
+    with NATIVE_LOCK:
+        voice = NATIVE.get("voice")
+        if not voice or voice.get("done"):
+            return
+        voice["done"] = True
+        timer = NATIVE.get("voice_timer")
+        if timer is not None:
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+            NATIVE["voice_timer"] = None
+    if reason:
+        print(f"native: Alice handled '{voice.get('text')}' ({reason})", flush=True)
+
+
+def native_on_voice_text(text: str) -> None:
+    if not native_setting():
+        return
+    duck(4.0)
+    low = (text or "").casefold().strip(" .!,")
+    if low in ("пауза", "стоп", "остановись", "останови", "хватит"):
+        pause()
+        return
+    if low in ("продолжи", "продолжить", "продолжай", "играй"):
+        # The cloud may answer "продолжи" with a fresh audio_play of the same
+        # track (no audio_player_continue_directive).  Treat that restart as a
+        # continuation: silence the native session and keep our position.
+        with NATIVE_LOCK:
+            NATIVE["continue_until"] = time.time() + 6.0
+            sid = NATIVE.get("last_prefetch") or ""
+            if sid:
+                NATIVE["continuing"][sid] = time.time() + 10.0
+        resume()
+        return
+    query = native_music_query(text)
+    if not query:
+        return
+    now = time.time()
+    with NATIVE_LOCK:
+        # A concrete song request always wins over a previous next/prev mark.
+        NATIVE["local_switch_until"] = 0.0
+        NATIVE["suppress_until"] = 0.0
+        prev = NATIVE.get("voice") or {}
+        if (
+            prev.get("text") == text
+            and not prev.get("done")
+            and now - float(prev.get("at") or 0.0) < 3.0
+        ):
+            return
+        timer = NATIVE.get("voice_timer")
+        if timer is not None:
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+        token = f"{now:.3f}"
+        NATIVE["voice"] = {
+            "text": text,
+            "query": query,
+            "at": now,
+            "done": False,
+            "token": token,
+        }
+        t = threading.Timer(5.0, native_voice_fallback, args=(token,))
+        t.daemon = True
+        NATIVE["voice_timer"] = t
+    t.start()
+    print(
+        f"native: heard '{text}', YouTube fallback in 5 s if Alice has no track",
+        flush=True,
+    )
+
+
+def native_voice_fallback(token: str) -> None:
+    with NATIVE_LOCK:
+        voice = NATIVE.get("voice") or {}
+        if voice.get("token") != token or voice.get("done"):
+            return
+        voice["done"] = True
+        NATIVE["voice_timer"] = None
+        query = voice.get("query") or ""
+    if not query:
+        return
+    print(f"native: Alice has no track, searching YouTube for '{query}'", flush=True)
+    try:
+        items = yt_search(query, limit=3)
+        if not items:
+            print("native: fallback: YouTube search returned nothing", flush=True)
+            return
+        item = None
+        path = None
+        last_exc = "no downloadable result"
+        for cand in items[:3]:
+            try:
+                path = download(cand["id"])
+                item = cand
+                break
+            except Exception as exc:
+                last_exc = exc
+        if path is None or item is None:
+            raise RuntimeError(str(last_exc)[:200])
+        track = {
+            "id": item["id"],
+            "title": item.get("title") or query,
+            "duration": float(item.get("duration") or 0.0),
+        }
+        STATE.kill_current()
+        with STATE.lock:
+            STATE.queue = []
+            STATE.queue_pos = 0
+            STATE.playlist = None
+        time.sleep(0.2)
+        _play_file(path, track)
+        print(
+            f"[{time.strftime('%H:%M:%S')}] native: fallback playing {track['title']}",
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"native: fallback failed: {exc}", flush=True)
+
+
+def native_on_prefetch(stream_id: str, late: bool = False) -> None:
+    if not native_setting():
+        return
+    print(f"[{time.strftime('%H:%M:%S')}] native: prefetch {stream_id}{' (late)' if late else ''}", flush=True)
+    now = time.time()
+    with NATIVE_LOCK:
+        if stream_id != NATIVE.get("last_prefetch"):
+            # A genuinely new request overrides a local next/prev suppression.
+            NATIVE["local_switch_until"] = 0.0
+            NATIVE["suppress_until"] = 0.0
+        handled_at = NATIVE["handled"].get(stream_id) or 0.0
+        if now - handled_at < 1.0:
+            return
+        prev = NATIVE["prep"].get(stream_id)
+        if prev and now - float(prev.get("at") or 0.0) < 120:
+            return
+        prep = {
+            "id": stream_id,
+            "query": "",
+            "track": None,
+            "path": None,
+            "error": "",
+            "event": threading.Event(),
+            "track_event": threading.Event(),
+            "late": bool(late),
+            "at": now,
+        }
+        NATIVE["prep"][stream_id] = prep
+        NATIVE["last_prefetch"] = stream_id
+        NATIVE["last_prefetch_at"] = now
+    threading.Thread(target=native_prepare, args=(prep,), daemon=True).start()
+
+
+def native_prepare(prep: dict) -> None:
+    sid = prep["id"]
+    try:
+        info = native_track_info(sid)
+        if info.get("title"):
+            prep["info"] = info
+            prep["query"] = f"{info.get('artists', '')} {info['title']}".strip()
+        if not prep["query"]:
+            prep["error"] = "no metadata"
+            return
+        items = yt_search(prep["query"], limit=5)
+        if not items:
+            prep["error"] = "nothing found on YouTube"
+            return
+        first = native_pick(items, prep.get("info") or {})
+        order = [first] + [i for i in items if i["id"] != first["id"]]
+        last_exc = "no downloadable result"
+        for cand in order[:4]:
+            try:
+                path = download(cand["id"])
+            except Exception as exc:
+                last_exc = str(exc)[:200]
+                print(f"native: download {cand['id']} failed: {last_exc}", flush=True)
+                continue
+            track = dict(cand)
+            track["native_id"] = sid
+            track["native_query"] = prep["query"]
+            prep["track"] = track
+            prep["others"] = [i for i in items if i["id"] != cand["id"]]
+            prep["path"] = path
+            prep["track_event"].set()
+            print(f"[{time.strftime('%H:%M:%S')}] native: ready {track.get('title')} [{sid}]", flush=True)
+            return
+        raise RuntimeError(last_exc)
+    except Exception as exc:
+        prep["error"] = str(exc)[:200]
+        print(f"native: prepare {sid} failed: {exc}", flush=True)
+    finally:
+        prep["track_event"].set()
+        prep["event"].set()
+
+
+def native_on_start() -> None:
+    if not native_setting():
+        return
+    print(f"[{time.strftime('%H:%M:%S')}] native: player_start", flush=True)
+    now = time.time()
+    suppress = False
+    with NATIVE_LOCK:
+        sid = NATIVE["last_prefetch"]
+        cont = bool(sid) and now < float(NATIVE.get("continue_until") or 0.0)
+        local = now < float(NATIVE.get("local_switch_until") or 0.0)
+        prep = NATIVE["prep"].get(sid) if sid else None
+        if cont:
+            NATIVE["continue_until"] = 0.0
+            NATIVE["continuing"][sid] = now + 8.0
+            suppress = True
+        elif local:
+            # We already switched locally (next/prev); the native start is the
+            # cloud's copy of that command.  Stop it, keep our own playback.
+            if now >= float(NATIVE.get("suppress_until") or 0.0):
+                NATIVE["suppress_until"] = now + 3.0
+                suppress = True
+            else:
+                return
+        elif not prep:
+            return
+        elif prep.get("started"):
+            if NATIVE.get("activating") == sid:
+                return
+            if prep.get("error") or not prep.get("path"):
+                if now - float(prep.get("at") or 0.0) < 2.0:
+                    return
+                # A failed request is being replayed (e.g. "previous track"):
+                # prepare it again instead of letting Yandex play.
+                prep["started"] = False
+                prep["error"] = ""
+                prep["path"] = None
+                prep["event"].clear()
+                print(f"native: retry {sid}", flush=True)
+                threading.Thread(
+                    target=native_prepare, args=(prep,), daemon=True
+                ).start()
+            else:
+                return
+        if not suppress:
+            prep["started"] = True
+            NATIVE["activating"] = sid
+    if suppress:
+        threading.Thread(target=native_suppress, args=(sid,), daemon=True).start()
+        return
+    threading.Thread(target=native_activate, args=(sid, prep), daemon=True).start()
+
+
+def native_mediad_pid(force: bool = False) -> int:
+    """PID of maind --mediad (the native player), cached for 30 s."""
+    now = time.time()
+    with NATIVE_LOCK:
+        pid = int(NATIVE_MEDIA.get("pid") or 0)
+        if pid and not force and now - float(NATIVE_MEDIA.get("at") or 0.0) < 30.0:
+            return pid
+    try:
+        out = ssh(
+            "ps -ef | grep '[m]aind --mediad' | awk '{print $1}' | head -1",
+            timeout=8,
+        ).stdout.strip()
+        pid = int(out.split()[0]) if out else 0
+    except Exception:
+        pid = 0
+    with NATIVE_LOCK:
+        NATIVE_MEDIA["pid"] = pid
+        NATIVE_MEDIA["at"] = now
+    return pid
+
+
+def native_freeze(seconds: float = 10.0) -> bool:
+    """Freeze the native audio daemon (SIGSTOP) without touching our player.
+
+    Our YouTube audio runs in a separate `maind --gst-launch` process, so it
+    keeps sounding while mediad (Alice TTS + native music) is stopped.  A
+    remote watchdog resumes mediad even if the bridge dies.
+    """
+    pid = native_mediad_pid()
+    if not pid:
+        return False
+    try:
+        gen = int(time.time() * 1000)
+        # Stop the audio before spawning the watchdog: the fewer remote
+        # processes between the SSH command and kill -STOP, the smaller the
+        # audible native fragment.
+        ssh(
+            f"echo {gen} > /tmp/yt_native_freeze_gen; "
+            f"[ -d /proc/{pid} ] && kill -STOP {pid} 2>/dev/null; "
+            f"nohup sh -c 'sleep {int(max(2, seconds))}; "
+            f'[ "$(cat /tmp/yt_native_freeze_gen 2>/dev/null)" = "{gen}" ] '
+            f"&& kill -CONT {pid} 2>/dev/null' >/dev/null 2>&1 & true",
+            timeout=8,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def native_thaw() -> None:
+    pid = int(NATIVE_MEDIA.get("pid") or 0)
+    if not pid:
+        return
+    try:
+        ssh(f"kill -CONT {pid} 2>/dev/null; true", timeout=8)
+    except Exception:
+        pass
+
+
+def native_suppress(sid: str) -> None:
+    """Silence the native player that Alice restarted for "Продолжи".
+
+    The cloud answers "продолжи" by resuming its own player.  We already
+    resumed our playback, so freeze mediad (our gst process keeps playing),
+    stop the native session, and unfreeze mediad once it is gone.  No amp
+    mute: the user's music never goes silent.
+    """
+    frozen = False
+    muted = False
+    try:
+        frozen = native_freeze(8.0)
+        if not frozen:
+            # Safety fallback: if mediad cannot be stopped, silence the amp
+            # instead of letting the native track leak through.
+            try:
+                amp_set(False)
+                muted = True
+            except Exception:
+                pass
+        with NATIVE_LOCK:
+            NATIVE["self_pause_until"] = time.time() + 4.0
+        sent = time.time()
+        native_cli_send("o")
+        time.sleep(max(1.4, 1.9 - (time.time() - sent)))
+        if frozen:
+            native_thaw()
+            frozen = False
+        print(f"native: continued (native {sid} stopped)", flush=True)
+    finally:
+        if frozen:
+            native_thaw()
+        if muted:
+            try:
+                amp_set(True)
+            except Exception:
+                pass
+
+
+def native_activate(sid: str, prep: dict) -> None:
+    muted = False
+    frozen = False
+    played = False
+    try:
+        late = bool(prep.get("late"))
+        # If the Music API already said "no metadata" (audiobook, podcast, an
+        # unknown id), leave the native playback alone instead of muting it.
+        if (
+            not late
+            and prep.get("error")
+            and not (prep.get("info") or {}).get("title")
+        ):
+            print(f"native: {sid}: {prep['error']}; native keeps playing", flush=True)
+            with NATIVE_LOCK:
+                NATIVE["prep"].pop(sid, None)
+            return
+        # Silence the native track first.  If our own music is playing, freeze
+        # mediad and leave the amplifier on: the old track keeps playing until
+        # the new file is ready, then we switch without a silent gap.  If
+        # nothing is playing, just mute the amp.
+        preserve = bool(STATE.pid and not STATE.paused)
+        t0 = time.time()
+        if preserve:
+            frozen = native_freeze(12.0)
+            if not frozen:
+                # Fallback if mediad could not be frozen: mute as before.
+                try:
+                    amp_set(False)
+                    muted = True
+                except Exception:
+                    pass
+            print(
+                f"native: froze native audio in {time.time() - t0:.2f}s, pause sent",
+                flush=True,
+            )
+        else:
+            try:
+                amp_set(False)
+                muted = True
+            except Exception:
+                pass
+            print(f"native: mute in {time.time() - t0:.2f}s, pause sent", flush=True)
+        with NATIVE_LOCK:
+            NATIVE["self_pause_until"] = time.time() + 4.0
+        sent = time.time()
+        native_cli_send("o")
+        if frozen:
+            # The cloud needs ~1.5 s to pause the native session.  Unfreeze
+            # after that: the old track keeps playing while the download
+            # finishes, and Alice's TTS/mic work again.
+            remain = 2.0 - (time.time() - sent)
+            if remain > 0:
+                time.sleep(remain)
+            native_thaw()
+            frozen = False
+        # Late requests have no prefetch, so metadata+search+download all
+        # happen while the speaker is muted.
+        prep["event"].wait(25)
+        if prep.get("error") or not prep.get("path"):
+            print(f"native: not playing {sid}: {prep.get('error') or 'no file'}", flush=True)
+            if frozen:
+                native_thaw()
+                frozen = False
+            if muted:
+                try:
+                    amp_set(True)
+                except Exception:
+                    pass
+            return
+        track = dict(prep.get("track") or {})
+        if not track:
+            return
+        with NATIVE_LOCK:
+            NATIVE["handled"][sid] = time.time()
+            NATIVE["prep"].pop(sid, None)
+        STATE.kill_current()
+        with STATE.lock:
+            STATE.queue = []
+            STATE.queue_pos = 0
+            STATE.playlist = None
+        time.sleep(0.2)
+        _play_file(prep["path"], track)
+        if muted:
+            time.sleep(0.7)
+            try:
+                amp_set(True)
+            except Exception:
+                pass
+            muted = False
+        played = True
+        print(f"[{time.strftime('%H:%M:%S')}] native: playing {track.get('title')} [{sid}]", flush=True)
+    except Exception as exc:
+        print(f"native: activate {sid} failed: {exc}", flush=True)
+    finally:
+        if frozen:
+            native_thaw()
+        if muted and not played:
+            try:
+                amp_set(True)
+            except Exception:
+                pass
+        with NATIVE_LOCK:
+            if NATIVE.get("activating") == sid:
+                NATIVE["activating"] = ""
+
+
+def native_cli_ensure():
+    proc = NATIVE_CLI["proc"]
+    if proc is not None and proc.poll() is None:
+        return proc
+    ready = threading.Event()
+    try:
+        proc = subprocess.Popen(
+            [
+                "ssh", "-T",
+                "-p", str(STATION_PORT),
+                "-o", "BatchMode=yes",
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null",
+                "-o", "ConnectTimeout=8",
+                "-o", "ServerAliveInterval=30",
+                f"{STATION_USER}@{STATION_HOST}",
+                "/system/vendor/quasar/maind --cli",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+        )
+    except Exception as exc:
+        print(f"native: cli start failed: {exc}", flush=True)
+        return None
+
+    prompt = threading.Event()
+
+    def reader() -> None:
+        try:
+            for line in proc.stdout:  # type: ignore[union-attr]
+                if "Connected to DirectiveSequencer" in line:
+                    ready.set()
+                if "UserInput:" in line:
+                    prompt.set()
+        except Exception:
+            pass
+        ready.set()
+        prompt.set()
+
+    threading.Thread(target=reader, daemon=True).start()
+    NATIVE_CLI["proc"] = proc
+    NATIVE_CLI["ready"] = ready
+    NATIVE_CLI["prompt"] = prompt
+    # The CLI prints the command list before its endpoint is connected to the
+    # daemon; commands written too early are silently dropped.
+    ready.wait(6)
+    time.sleep(0.2)
+    return proc
+
+
+def native_cli_send(text: str) -> bool:
+    with NATIVE_CLI_LOCK:
+        proc = native_cli_ensure()
+        if proc is None or proc.stdin is None:
+            return False
+        ready = NATIVE_CLI["ready"]
+        if ready is not None and not ready.wait(6):
+            return False
+        try:
+            proc.stdin.write(text + "\n")
+            proc.stdin.flush()
+            return True
+        except Exception as exc:
+            print(f"native: cli write failed: {exc}", flush=True)
+            NATIVE_CLI["proc"] = None
+            return False
+
+
+def native_text_query(text: str) -> bool:
+    """Ask the Station's own Alice to run a text query (auto-next)."""
+    with NATIVE_CLI_LOCK:
+        proc = native_cli_ensure()
+        if proc is None or proc.stdin is None:
+            return False
+        ready = NATIVE_CLI["ready"]
+        if ready is not None and not ready.wait(6):
+            return False
+        prompt = NATIVE_CLI.get("prompt")
+        if prompt is not None:
+            prompt.clear()
+        try:
+            proc.stdin.write("q\n")
+            proc.stdin.flush()
+            if prompt is not None:
+                prompt.wait(3)
+            proc.stdin.write(text + "\n")
+            proc.stdin.flush()
+            return True
+        except Exception as exc:
+            print(f"native: cli write failed: {exc}", flush=True)
+            NATIVE_CLI["proc"] = None
+            return False
+
+
+def native_mark_local_switch(seconds: float = 4.0) -> None:
+    """Ignore the cloud's own player_start after we switched track locally."""
+    with NATIVE_LOCK:
+        NATIVE["local_switch_until"] = time.time() + seconds
+        NATIVE["suppress_until"] = 0.0
+
+
+def native_handle_line(line: str) -> None:
+    if not native_setting():
+        return
+    if "recognizedPhrase='" in line:
+        m = NATIVE_RE_PHRASE.search(line)
+        if m:
+            native_on_voice_text(m.group(1))
+        return
+    if "AUDIO_PLAY" in line:
+        # Alice resolved the request to a track; no YouTube fallback needed.
+        native_voice_done("native audio")
+    if "prefetchDirective" in line and "AUDIO_PLAY" in line:
+        m = NATIVE_RE_STREAM.search(line)
+        if m:
+            native_on_prefetch(m.group(1))
+        return
+    if "Music session changed to player_start" in line:
+        native_on_start()
+        return
+    if "handleDirective" in line and "AUDIO_PLAY" in line and "[Started" in line:
+        # Fallback: maind.log rotates often and can lose player_start, and
+        # "next track" directives are not prefetched.
+        m = NATIVE_RE_STREAM.search(line)
+        if m:
+            sid = m.group(1)
+            now = time.time()
+            with NATIVE_LOCK:
+                cont = now < float(NATIVE.get("continue_until") or 0.0)
+                local = now < float(NATIVE.get("local_switch_until") or 0.0)
+                if cont:
+                    NATIVE["continuing"][sid] = now + 10.0
+                prev = NATIVE["prep"].get(sid)
+                if (
+                    prev
+                    and prev.get("started")
+                    and NATIVE.get("activating") != sid
+                    and now - float(prev.get("at") or 0.0) > 2.0
+                ):
+                    # Forget a failed (or already played) attempt: a fresh
+                    # player_start for this id is a new request.
+                    NATIVE["prep"].pop(sid, None)
+                    prev = None
+                known = (
+                    cont
+                    or local
+                    or prev is not None
+                    or NATIVE.get("activating") == sid
+                    or now < float(NATIVE["continuing"].get(sid) or 0.0)
+                )
+                NATIVE["last_prefetch"] = sid
+            if not known:
+                native_on_prefetch(sid, late=True)
+        native_on_start()
+        return
+    if "alice_request.TEXT_INPUT" in line:
+        duck(4.0)
+        return
+    if "routeDirective" in line:
+        m = NATIVE_RE_DIRECTIVE.search(line)
+        if not m:
+            return
+        name = m.group(1)
+        if name in ("player_pause", "clear_queue"):
+            with NATIVE_LOCK:
+                if time.time() < float(NATIVE.get("self_pause_until") or 0.0):
+                    return
+            pause()
+        elif name in ("audio_player_continue_directive", "playback_toggle_play_pause"):
+            with NATIVE_LOCK:
+                NATIVE["continue_until"] = time.time() + 6.0
+                sid = NATIVE.get("last_prefetch") or ""
+                if sid:
+                    NATIVE["continuing"][sid] = time.time() + 8.0
+            resume()
+        elif name == "player_next":
+            if play_next().get("ok"):
+                native_mark_local_switch(4.0)
+            else:
+                native_text_query("следующий трек")
+        elif name == "player_prev":
+            if play_prev().get("ok"):
+                native_mark_local_switch(4.0)
+
+
+def native_watch_loop() -> None:
+    while True:
+        proc = None
+        try:
+            proc = subprocess.Popen(
+                SSH_BASE[:-1]
+                + ["-o", "ServerAliveInterval=20", f"{STATION_USER}@{STATION_HOST}",
+                   f"tail -n 0 -F {NATIVE_LOG}"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                bufsize=1,
+            )
+            for line in proc.stdout:
+                try:
+                    native_handle_line(line)
+                except Exception as exc:
+                    print(f"native: {exc}", flush=True)
+        except Exception as exc:
+            print(f"native: tail failed: {exc}", flush=True)
+        finally:
+            try:
+                if proc is not None and proc.poll() is None:
+                    proc.kill()
+            except Exception:
+                pass
+        time.sleep(5)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1490,7 +2771,16 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/health":
                 self._json({"ok": True, "role": "alice-webhook"})
             else:
-                self.send_error(404)
+                # A browser hit on the webhook address: useful for diagnosing a
+                # wrong path in the skill settings.
+                self._json(
+                    {
+                        "ok": True,
+                        "role": "alice-webhook",
+                        "hint": "POST /alice is the skill endpoint",
+                        "path": p,
+                    }
+                )
             return
 
         if p in ("/", "/index.html"):
@@ -1578,6 +2868,20 @@ class Handler(BaseHTTPRequestHandler):
             quick = (qs.get("quick") or ["0"])[0].lower() in ("1", "true", "yes")
             self._json(youtube_status(force=force, quick=quick))
             return
+        if p == "/api/youtube/login/open":
+            self._json(youtube_login_open())
+            return
+        if p == "/api/youtube/login/import":
+            self._json(youtube_login_import())
+            return
+        if p == "/api/youtube/logout":
+            self._json(youtube_logout())
+            return
+        if p == "/api/alice":
+            text = (qs.get("text") or [""])[0].strip()
+            ok = native_text_query(text) if text else False
+            self._json({"ok": ok, "text": text})
+            return
         if p == "/api/youtube/settings":
             patch: dict = {}
             if "browser" in qs:
@@ -1590,6 +2894,12 @@ class Handler(BaseHTTPRequestHandler):
                 patch["playlist_limit"] = (qs.get("limit") or ["50"])[0]
             if "proxy" in qs:
                 patch["proxy"] = (qs.get("proxy") or [""])[0]
+            if "default_playlist" in qs:
+                patch["default_playlist"] = (qs.get("default_playlist") or [""])[0]
+            if "skill_name" in qs:
+                patch["skill_name"] = (qs.get("skill_name") or [""])[0]
+            if "native" in qs:
+                patch["native_watch"] = (qs.get("native") or ["1"])[0] not in ("0", "false", "off")
             self._json(update_youtube_settings(patch))
             return
         if p in ("/api/playlist", "/api/play_playlist"):
@@ -1620,6 +2930,11 @@ class Handler(BaseHTTPRequestHandler):
             pid = (qs.get("id") or [""])[0]
             self._json(delete_playlist(pid))
             return
+        if p == "/api/native_voice":
+            text = (qs.get("text") or [""])[0]
+            native_on_voice_text(text)
+            self._json({"ok": True, "text": text})
+            return
         if p == "/health":
             self._json({"ok": True, "ytdlp": YTDLP, "pc_ip": PC_IP, "station": STATION_HOST})
             return
@@ -1635,20 +2950,29 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             body = {}
 
-        if self._is_skill_server():
-            if u.path != "/alice":
+        if self._is_skill_server() or u.path == "/alice":
+            # Any path on the public webhook port is treated as the skill
+            # endpoint: the URL in the developer console may be pasted with or
+            # without "/alice". Only real Alice payloads are answered, so
+            # random internet scanners cannot start playback.
+            looks_alice = isinstance(body, dict) and (
+                "request" in body or "session" in body or "version" in body
+            )
+            if not looks_alice:
                 self.send_error(404)
                 return
-        else:
-            if u.path != "/alice":
-                self.send_error(404)
-                return
+            print(
+                f"alice request: path={u.path} ua={self.headers.get('User-Agent', '')!r}",
+                flush=True,
+            )
+            try:
+                self._json(handle_alice(body))
+            except Exception as exc:
+                print("alice error:", exc, flush=True)
+                self._json(alice_reply("Что-то пошло не так. Попробуй ещё раз."))
+            return
 
-        try:
-            self._json(handle_alice(body))
-        except Exception as exc:
-            print("alice error:", exc, flush=True)
-            self._json(alice_reply("Что-то пошло не так. Попробуй ещё раз."))
+        self.send_error(404)
 
 
 def main() -> None:
@@ -1676,6 +3000,17 @@ def main() -> None:
 
     audio = ThreadingHTTPServer(("0.0.0.0", HTTP_PORT), Handler)
     skill = ThreadingHTTPServer(("0.0.0.0", SKILL_PORT), Handler)
+
+    threading.Thread(target=native_watch_loop, daemon=True).start()
+    threading.Thread(target=lambda: ssh(KILL_GST, timeout=10), daemon=True).start()
+    threading.Thread(
+        target=lambda: (native_mediad_pid(force=True), native_thaw()), daemon=True
+    ).start()
+    threading.Thread(target=native_cli_ensure, daemon=True).start()
+    if native_setting():
+        print("native: intercepting Station music -> YouTube")
+    else:
+        print("native: interception disabled in settings")
 
     threading.Thread(target=audio.serve_forever, daemon=True).start()
     print(f"web ui:       http://{PC_IP}:{HTTP_PORT}/")

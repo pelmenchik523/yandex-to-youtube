@@ -95,12 +95,26 @@
     border:4px solid var(--accent);box-shadow:0 2px 10px rgba(0,0,0,.35)
   }
   input[type=range]::-moz-range-thumb{width:17px;height:17px;border-radius:50%;background:#fff;border:4px solid var(--accent)}
-  .search{display:flex;gap:10px;margin-top:18px}
-  .search input[type=text]{
-    flex:1;min-width:0;border:1px solid var(--line);background:rgba(255,255,255,.04);color:var(--text);
-    border-radius:14px;padding:13px 15px;font-size:14px;outline:none
+  .search{display:flex;gap:10px;margin-top:18px;align-items:stretch}
+  .searchbox{
+    position:relative;flex:1;min-width:0;display:flex;align-items:center;
+    border:1px solid var(--line);border-radius:16px;
+    background:linear-gradient(180deg,rgba(255,255,255,.055),rgba(255,255,255,.022));
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.04);
+    transition:border-color .15s ease,box-shadow .15s ease,background .15s ease
   }
-  .search input[type=text]:focus{border-color:rgba(91,140,255,.55);box-shadow:0 0 0 4px rgba(91,140,255,.12)}
+  .searchbox:focus-within{
+    border-color:rgba(91,140,255,.65);
+    box-shadow:0 0 0 4px rgba(91,140,255,.13),inset 0 1px 0 rgba(255,255,255,.05);
+    background:linear-gradient(180deg,rgba(255,255,255,.07),rgba(255,255,255,.03))
+  }
+  .searchbox svg{position:absolute;left:16px;width:18px;height:18px;fill:var(--muted);pointer-events:none;opacity:.85}
+  .searchbox input{
+    width:100%;height:50px;border:0;outline:none;background:transparent;color:var(--text);
+    padding:0 16px 0 46px;font-size:14.5px;font-family:inherit
+  }
+  .searchbox input::placeholder{color:#697894}
+  .search .btn{height:50px;padding:0 22px;border-radius:16px;flex:0 0 auto}
   .btn{
     border:1px solid var(--line);background:rgba(255,255,255,.06);color:var(--text);
     border-radius:14px;padding:12px 16px;font-size:13.5px;font-weight:600;cursor:pointer;
@@ -155,13 +169,67 @@
   .actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}
   .note{color:var(--muted);font-size:12px;line-height:1.55;margin-top:12px}
   .yt-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-  .field{display:flex;flex-direction:column;gap:6px;min-width:0}
-  .field label{font-size:11.5px;color:var(--muted);letter-spacing:.3px}
+  .field{display:flex;flex-direction:column;gap:7px;min-width:0}
+  .field label{font-size:11px;color:var(--muted);letter-spacing:.7px;text-transform:uppercase;margin-left:2px;font-weight:600}
+  .input{position:relative;display:flex;align-items:center;min-width:0}
+  .input > svg{position:absolute;left:14px;width:17px;height:17px;fill:var(--muted);pointer-events:none;opacity:.8}
   .field input[type=text], .field input[type=number], .field select{
-    width:100%;border:1px solid var(--line);background:rgba(255,255,255,.04);color:var(--text);
-    border-radius:12px;padding:10px 12px;font-size:13px;outline:none;min-width:0
+    width:100%;height:46px;border:1px solid var(--line);color:var(--text);
+    background:linear-gradient(180deg,rgba(255,255,255,.05),rgba(255,255,255,.022));
+    border-radius:14px;padding:0 14px;font-size:13.5px;outline:none;min-width:0;font-family:inherit;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.035);
+    transition:border-color .15s ease,box-shadow .15s ease,background .15s ease
   }
-  .field input:focus, .field select:focus{border-color:rgba(91,140,255,.55);box-shadow:0 0 0 3px rgba(91,140,255,.12)}
+  .field .input > input, .field .input > select{padding-left:42px}
+  .field input:focus, .field select:focus{
+    border-color:rgba(91,140,255,.6);
+    box-shadow:0 0 0 3.5px rgba(91,140,255,.13),inset 0 1px 0 rgba(255,255,255,.05);
+    background:linear-gradient(180deg,rgba(255,255,255,.07),rgba(255,255,255,.03))
+  }
+  .field input::placeholder{color:#697894}
+  .field input[type=number]::-webkit-inner-spin-button{opacity:.5}
+  .account{
+    display:flex;align-items:center;gap:14px;padding:14px;margin-bottom:10px;
+    border:1px solid var(--line);border-radius:18px;
+    background:linear-gradient(180deg,rgba(255,255,255,.045),rgba(255,255,255,.015))
+  }
+  .acc-avatar{
+    width:52px;height:52px;border-radius:16px;flex:0 0 auto;position:relative;
+    display:grid;place-items:center;background:linear-gradient(135deg,#ff0033,#ff5c7a);
+    box-shadow:0 10px 26px rgba(255,0,51,.22)
+  }
+  .acc-avatar svg{width:26px;height:26px;fill:#fff}
+  .acc-dot{
+    position:absolute;right:-3px;bottom:-3px;width:15px;height:15px;border-radius:50%;
+    background:#56627d;border:3px solid #131a2a;transition:.2s
+  }
+  .acc-dot.on{background:var(--good);box-shadow:0 0 12px rgba(66,211,146,.8)}
+  .acc-info{flex:1;min-width:0}
+  .acc-title{font-size:14.5px;font-weight:650;letter-spacing:.1px}
+  .acc-sub{font-size:12.5px;color:var(--muted);margin-top:3px;line-height:1.4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .acc-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;flex:0 0 auto}
+  .btn.small{padding:9px 13px;font-size:12.5px;border-radius:12px}
+  .hint{font-size:12px;line-height:1.55;color:var(--muted);margin:0 2px 10px}
+  .toggle-row{
+    display:flex;align-items:center;justify-content:space-between;gap:14px;
+    padding:14px;border:1px solid var(--line);border-radius:16px;
+    background:linear-gradient(180deg,rgba(91,140,255,.075),rgba(91,140,255,.025));
+    margin-top:12px
+  }
+  .toggle-row .t{font-size:13.5px;font-weight:600}
+  .toggle-row .d{font-size:12px;color:var(--muted);margin-top:3px;line-height:1.45}
+  details.adv{
+    margin-top:12px;border:1px solid var(--line);border-radius:16px;
+    background:rgba(255,255,255,.018);padding:0 14px
+  }
+  details.adv > summary{
+    cursor:pointer;list-style:none;padding:13px 0;font-size:12.5px;color:var(--muted);
+    display:flex;align-items:center;gap:8px;user-select:none
+  }
+  details.adv > summary::-webkit-details-marker{display:none}
+  details.adv > summary::before{content:"▸";font-size:11px;transition:transform .15s ease;color:#7f8fb0}
+  details.adv[open] > summary::before{transform:rotate(90deg)}
+  details.adv .advbody{padding:2px 0 14px}
   .pl-status{font-size:12px;line-height:1.55;color:var(--muted);margin-top:10px}
   .pl-status.ok{color:var(--good)}
   .pl-status.bad{color:var(--bad)}
@@ -172,11 +240,16 @@
   .pl-meta{font-size:11.5px;color:var(--muted);flex:0 0 auto}
   .pl-del{border:0;background:transparent;color:var(--muted);cursor:pointer;font-size:16px;padding:2px 5px;border-radius:8px}
   .pl-del:hover{color:var(--bad);background:rgba(255,92,122,.08)}
-  @media(max-width:600px){.yt-grid{grid-template-columns:1fr}}
-  .webhook{display:flex;gap:8px;margin-top:10px}
-  .webhook code{
-    flex:1;min-width:0;background:rgba(0,0,0,.28);border:1px solid var(--line);border-radius:12px;
-    padding:11px 12px;font-size:12px;color:#bcd0ff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap
+  .pl-star{border:0;background:transparent;color:var(--muted);cursor:pointer;font-size:15px;padding:2px 4px;border-radius:8px;line-height:1}
+  .pl-star:hover{background:rgba(255,255,255,.07)}
+  .pl-star.on{color:#ffd166}
+  @media(max-width:600px){
+    .yt-grid{grid-template-columns:1fr}
+    .account{flex-wrap:wrap}
+    .acc-actions{width:100%;justify-content:flex-start}
+    .acc-sub{white-space:normal}
+    .search{flex-direction:column}
+    .search .btn{width:100%}
   }
   .statusline{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px;margin-top:12px}
   .spinner{
@@ -257,7 +330,10 @@
         </div>
 
         <form class="search" id="searchForm">
-          <input type="text" id="q" placeholder="Название трека или исполнитель" autocomplete="off">
+          <div class="searchbox">
+            <svg viewBox="0 0 24 24"><path d="M10 4a6 6 0 1 0 3.47 10.9l4.31 4.31 1.42-1.42-4.31-4.31A6 6 0 0 0 10 4zm0 2a4 4 0 1 1 0 8 4 4 0 0 1 0-8z"/></svg>
+            <input type="text" id="q" placeholder="Трек, исполнитель или ссылка на плейлист" autocomplete="off">
+          </div>
           <button class="btn accent" type="submit" id="searchBtn">Включить</button>
         </form>
 
@@ -267,56 +343,81 @@
       </section>
 
       <section class="card">
-        <h2>YouTube: вход и плейлисты</h2>
-        <div class="yt-grid">
-          <div class="field">
-            <label>Cookies из браузера</label>
-            <input id="ytBrowser" list="ytBrowserList" placeholder="firefox" autocomplete="off">
-            <datalist id="ytBrowserList">
-              <option value="firefox">
-              <option value="chromium">
-              <option value="chrome">
-              <option value="edge">
-              <option value="brave">
-              <option value="opera">
-              <option value="vivaldi">
-              <option value="none">
-            </datalist>
+        <h2>YouTube</h2>
+
+        <div class="account" id="ytAccount">
+          <div class="acc-avatar" id="ytAvatar">
+            <svg viewBox="0 0 24 24"><path d="M23 12s0-3.5-.45-5.17a2.9 2.9 0 0 0-2.04-2.05C18.84 4.3 12 4.3 12 4.3s-6.84 0-8.51.48A2.9 2.9 0 0 0 1.45 6.83C1 8.5 1 12 1 12s0 3.5.45 5.17a2.9 2.9 0 0 0 2.04 2.05C5.16 19.7 12 19.7 12 19.7s6.84 0 8.51-.48a2.9 2.9 0 0 0 2.04-2.05C23 15.5 23 12 23 12zM9.75 15.5v-7L15.5 12l-5.75 3.5z"/></svg>
+            <span class="acc-dot" id="ytDot"></span>
           </div>
-          <div class="field">
-            <label>Или cookies.txt</label>
-            <input id="ytCookiesFile" placeholder="~/cookies.txt" autocomplete="off">
+          <div class="acc-info">
+            <div class="acc-title" id="ytAccTitle">Аккаунт YouTube</div>
+            <div class="acc-sub" id="ytAccSub">Проверяю вход…</div>
+          </div>
+          <div class="acc-actions">
+            <button class="btn accent small" id="ytLogin">Войти</button>
+            <button class="btn accent small" id="ytImport" hidden>Я вошёл</button>
+            <button class="btn ghost small" id="ytCheck" hidden>Проверить</button>
+            <button class="btn ghost small" id="ytLogout" hidden>Выйти</button>
           </div>
         </div>
-        <div class="field" style="margin-top:10px">
-          <label>Прокси для YouTube (необязательно)</label>
-          <input id="ytProxy" placeholder="socks5://127.0.0.1:1080" autocomplete="off">
+        <div class="hint" id="ytHint">Вход откроется в Firefox на этом компьютере. Пароль вводится только на сайте Google.</div>
+        <div class="pl-status" id="ytStatus">Проверяю настройки…</div>
+
+        <div class="toggle-row">
+          <div>
+            <div class="t">Перехват голоса</div>
+            <div class="d">«Алиса, включи …»: нативная музыка глушится, трек играет с YouTube.</div>
+          </div>
+          <label class="switch"><input type="checkbox" id="ytNative"><span class="slider"></span></label>
+        </div>
+
+        <details class="adv">
+          <summary>Дополнительно</summary>
+          <div class="advbody">
+            <div class="field">
+              <label>Прокси для YouTube</label>
+              <div class="input">
+                <svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm6.9 6h-2.6a15.7 15.7 0 0 0-1.2-3.4A8 8 0 0 1 18.9 8zM12 4.1c.6.9 1.2 2.2 1.6 3.9h-3.2c.4-1.7 1-3 1.6-3.9zM4.3 14a8.2 8.2 0 0 1 0-4h3a16.5 16.5 0 0 0 0 4h-3zm.8 2h2.6c.3 1.2.7 2.3 1.2 3.4A8 8 0 0 1 5.1 16zm2.6-8H5.1a8 8 0 0 1 3.8-3.4A15.7 15.7 0 0 0 7.7 8zM12 19.9c-.6-.9-1.2-2.2-1.6-3.9h3.2c-.4 1.7-1 3-1.6 3.9zM14.2 14H9.8a14.7 14.7 0 0 1 0-4h4.4a14.7 14.7 0 0 1 0 4zm1 5.4c.5-1.1.9-2.2 1.2-3.4h2.6a8 8 0 0 1-3.8 3.4zm1.5-5.4a16.5 16.5 0 0 0 0-4h3a8.2 8.2 0 0 1 0 4h-3z"/></svg>
+                <input id="ytProxy" type="text" placeholder="socks5://127.0.0.1:1080" autocomplete="off">
+              </div>
+            </div>
+            <div class="yt-grid" style="margin-top:10px">
+              <div class="field">
+                <label>JS-рантайм</label>
+                <div class="input">
+                  <svg viewBox="0 0 24 24"><path d="M8.5 4 3 12l5.5 8h3.2L6.3 12l5.4-8H8.5zm7 0h-3.2l5.4 8-5.4 8h3.2L21 12l-5.5-8z"/></svg>
+                  <input id="ytJs" type="text" placeholder="node" autocomplete="off">
+                </div>
+              </div>
+              <div class="field">
+                <label>Лимит треков в плейлисте</label>
+                <div class="input">
+                  <svg viewBox="0 0 24 24"><path d="M4 5h16v2H4V5zm0 6h16v2H4v-2zm0 6h10v2H4v-2z"/></svg>
+                  <input id="ytLimit" type="number" min="1" max="500" value="50">
+                </div>
+              </div>
+            </div>
+            <div class="actions">
+              <button class="btn" id="ytSave">Сохранить настройки</button>
+            </div>
+          </div>
+        </details>
+
+        <div class="field" style="margin-top:16px">
+          <label>Плейлист по ссылке или ID</label>
+          <div class="input">
+            <svg viewBox="0 0 24 24"><path d="M10.6 13.4a1 1 0 0 1 0-1.4l2.8-2.8a3 3 0 0 1 4.2 4.2l-1.6 1.6-1.4-1.4 1.6-1.6a1 1 0 0 0-1.4-1.4l-2.8 2.8a1 1 0 0 1-1.4 0zm2.8-2.8a1 1 0 0 1 0 1.4l-2.8 2.8a3 3 0 0 1-4.2-4.2l1.6-1.6 1.4 1.4-1.6 1.6a1 1 0 0 0 1.4 1.4l2.8-2.8a1 1 0 0 1 1.4 0z"/></svg>
+            <input id="plUrl" type="text" placeholder="https://www.youtube.com/playlist?list=..." autocomplete="off">
+          </div>
         </div>
         <div class="yt-grid" style="margin-top:10px">
           <div class="field">
-            <label>JS-рантайм</label>
-            <input id="ytJs" placeholder="node" autocomplete="off">
-          </div>
-          <div class="field">
-            <label>Лимит треков в плейлисте</label>
-            <input id="ytLimit" type="number" min="1" max="500" value="50">
-          </div>
-        </div>
-        <div class="actions">
-          <button class="btn" id="ytSave">Сохранить</button>
-          <button class="btn accent" id="ytCheck">Проверить вход</button>
-        </div>
-        <div class="pl-status" id="ytStatus">Проверяю настройки…</div>
-        <div class="note">Вход берётся из cookies браузера на этом компьютере. Войди в YouTube в Firefox/Chrome и выбери браузер. Для приватных плейлистов и «Мне понравилось» нужен вход.</div>
-
-        <div class="field" style="margin-top:14px">
-          <label>Плейлист по ссылке или ID</label>
-          <input id="plUrl" placeholder="https://www.youtube.com/playlist?list=..." autocomplete="off">
-        </div>
-        <div class="yt-grid" style="margin-top:8px">
-          <div class="field">
             <label>Название (необязательно)</label>
-            <input id="plName" placeholder="Например, Рок" autocomplete="off">
+            <div class="input">
+              <svg viewBox="0 0 24 24"><path d="M21.4 11.6l-9-9A2 2 0 0 0 11 2H4a2 2 0 0 0-2 2v7c0 .5.2 1 .6 1.4l9 9a2 2 0 0 0 2.8 0l7-7a2 2 0 0 0 0-2.8zM6.5 8A1.5 1.5 0 1 1 8 6.5 1.5 1.5 0 0 1 6.5 8z"/></svg>
+              <input id="plName" type="text" placeholder="Например, Рок" autocomplete="off">
+            </div>
           </div>
           <div class="actions" style="margin-top:0;align-items:flex-end">
             <button class="btn accent" id="plPlay">Играть</button>
@@ -331,6 +432,7 @@
         <div class="queue-head" style="display:flex"><span>Сохранённые плейлисты</span><span id="plCount"></span></div>
         <div class="pl-list" id="plSaved"><div class="empty">Пока нет сохранённых плейлистов</div></div>
         <div class="note" id="plNow"></div>
+        <div class="note">★ — основной плейлист. Он играет при голосовом запуске музыки и через API.</div>
       </section>
     </div>
 
@@ -378,16 +480,6 @@
         </div>
         <div class="note">«Выключить» — полное выключение колонки. Включить обратно можно кнопкой на корпусе или умной розеткой; удалённого включения у Lite 2 нет.</div>
       </section>
-
-      <section class="card">
-        <h2>Навык Алисы</h2>
-        <div class="note">Webhook для приватного навыка в dialogs.yandex.ru/developer:</div>
-        <div class="webhook">
-          <code id="webhook">туннель не запущен</code>
-          <button class="btn" id="copyWebhook" title="Скопировать">⧉</button>
-        </div>
-        <div class="note" id="skillHint">Фраза: «Алиса, попроси Ютуб включить …»</div>
-      </section>
     </div>
   </div>
 </div>
@@ -396,7 +488,7 @@
 <script>window.__INITIAL_STATE__ = null;</script>
 <script>
 const $ = (id) => document.getElementById(id);
-const state = { data:{}, ledEditing:0, volumeTimer:0, ledTimer:0, fails:0, poweringOff:false, ytLoaded:false };
+const state = { data:{}, ledEditing:0, volumeTimer:0, ledTimer:0, fails:0, poweringOff:false, ytLoaded:false, ytDefault:"", ytPlaylists:[], loginWaiting:false, ytChecked:false };
 
 function fmt(sec){
   sec = Math.max(0, Math.floor(Number(sec)||0));
@@ -511,9 +603,6 @@ function render(d){
     $("ledNote").textContent = led.mode === "breathing" ? "Дыхание включено." : "Статический цвет включён.";
   }
   $("amp").checked = !!d.amp_on;
-  const url = d.public_url ? d.public_url + "/alice" : "туннель не запущен";
-  $("webhook").textContent = url;
-  $("webhook").title = url;
 
   document.body.classList.toggle("offline", false);
 }
@@ -527,6 +616,15 @@ function hexToRgb(hex){
 
 function renderSaved(items){
   const box = $("plSaved");
+  state.ytPlaylists = items;
+  const defRef = String(state.ytDefault || "").toLowerCase();
+  let defId = "";
+  if(defRef){
+    const hit = items.find(x=>[x.id, x.url, x.name].some(v=>String(v||"").toLowerCase()===defRef));
+    defId = hit ? hit.id : "";
+  } else if(items.length){
+    defId = items[0].id;
+  }
   $("plCount").textContent = items.length ? items.length + " сохранено" : "";
   if(!items.length){
     box.innerHTML = '<div class="empty">Пока нет сохранённых плейлистов</div>';
@@ -543,15 +641,77 @@ function renderSaved(items){
     const meta = document.createElement("div");
     meta.className = "pl-meta";
     meta.textContent = item.count ? item.count + " треков" : "";
+    const isDefault = item.id === defId;
+    const star = document.createElement("button");
+    star.className = "pl-star" + (isDefault ? " on" : "");
+    star.title = isDefault ? "Основной плейлист" : "Сделать основным";
+    star.textContent = isDefault ? "★" : "☆";
+    star.onclick = (e)=>{ e.stopPropagation(); setDefaultPlaylist(isDefault ? "" : item.id); };
     const del = document.createElement("button");
     del.className = "pl-del";
     del.title = "Удалить из сохранённых";
     del.textContent = "×";
     del.onclick = (e)=>{ e.stopPropagation(); deleteSaved(item); };
-    row.append(name, meta, del);
+    row.append(star, name, meta, del);
     row.onclick = ()=> playPlaylist(item.url || item.id, item.name || "");
     box.append(row);
   });
+}
+
+async function setDefaultPlaylist(id){
+  try{
+    const r = await api("/api/youtube/settings?default_playlist=" + encodeURIComponent(id || ""));
+    if(!r.ok){ toast(r.error || "Не удалось сохранить"); return; }
+    state.ytDefault = (r.settings && r.settings.default_playlist) || "";
+    toast(id ? "Основной плейлист обновлён" : "Основной плейлист сброшен");
+    renderSaved(state.ytPlaylists || []);
+  }catch(e){ toast("Ошибка: " + e.message); }
+}
+
+function updateLoginButtons(logged, settings){
+  const login = $("ytLogin"), imp = $("ytImport"), check = $("ytCheck"), out = $("ytLogout");
+  login.hidden = false;
+  out.hidden = logged !== true;
+  check.hidden = logged !== true && !(settings && (settings.login_source || state.loginWaiting));
+  imp.hidden = !state.loginWaiting;
+}
+
+function applyYouTubeStatus(d){
+  state.youtube = d;
+  const s = d.settings || {};
+  const logged = d.logged_in;
+  $("ytJs").value = s.js_runtimes || "";
+  $("ytLimit").value = s.playlist_limit || 50;
+  $("ytProxy").value = s.proxy || "";
+  $("ytNative").checked = !!s.native_watch;
+  state.ytDefault = s.default_playlist || "";
+
+  const avatar = $("ytAvatar"), dot = $("ytDot");
+  avatar.classList.toggle("on", logged === true);
+  dot.classList.toggle("on", logged === true);
+  if(logged === true){
+    $("ytAccTitle").textContent = "Аккаунт подключён";
+    $("ytAccSub").textContent = s.login_source === "file"
+      ? "Сессия сохранена · приватные плейлисты доступны"
+      : "Вход через браузер · приватные плейлисты доступны";
+    $("ytHint").textContent = "Аккаунт подключён. «Войти» обновит сессию, «Выйти» отключит её в мосте — аккаунт в браузере останется.";
+  }else if(logged === false){
+    $("ytAccTitle").textContent = "Аккаунт не подключён";
+    $("ytAccSub").textContent = "Войди, чтобы открыть «Мне понравилось» и приватные плейлисты";
+    if(!state.loginWaiting){
+      $("ytHint").textContent = "Вход откроется в Firefox на этом компьютере. Пароль вводится только на сайте Google.";
+    }
+  }else{
+    $("ytAccTitle").textContent = "Аккаунт YouTube";
+    $("ytAccSub").textContent = "Проверяю вход…";
+  }
+
+  const st = $("ytStatus");
+  st.textContent = d.message || (logged === true ? "Вход работает." : "Вход не проверен.");
+  st.className = "pl-status " + (logged === true ? "ok" : (logged === false ? "bad" : ""));
+  updateLoginButtons(logged, s);
+  renderSaved(d.playlists || []);
+  state.ytLoaded = true;
 }
 
 async function loadYouTube(opts){
@@ -561,17 +721,11 @@ async function loadYouTube(opts){
   if(opts.force) qs.set("force","1");
   try{
     const d = await api("/api/youtube/status" + (qs.toString() ? "?" + qs.toString() : ""));
-    state.youtube = d;
-    $("ytBrowser").value = (d.settings && d.settings.cookies_from_browser) || "";
-    $("ytCookiesFile").value = (d.settings && d.settings.cookies_file) || "";
-    $("ytJs").value = (d.settings && d.settings.js_runtimes) || "";
-    $("ytLimit").value = (d.settings && d.settings.playlist_limit) || 50;
-    $("ytProxy").value = (d.settings && d.settings.proxy) || "";
-    const st = $("ytStatus");
-    st.textContent = d.message || (d.logged_in ? "Вход работает." : "Вход не проверен.");
-    st.className = "pl-status " + (d.logged_in === true ? "ok" : (d.logged_in === false ? "bad" : ""));
-    renderSaved(d.playlists || []);
-    state.ytLoaded = true;
+    applyYouTubeStatus(d);
+    if(opts.quick && d.logged_in === null && !state.ytChecked){
+      state.ytChecked = true;
+      setTimeout(()=>loadYouTube({force:true}), 50);
+    }
   }catch(e){
     $("ytStatus").textContent = "API входа недоступен: " + e.message;
     $("ytStatus").className = "pl-status bad";
@@ -691,26 +845,72 @@ $("poweroff").onclick = async ()=>{
   try{ await api("/api/power?action=poweroff"); }
   catch(e){ state.poweringOff = false; toast("Не удалось выключить"); }
 };
-$("copyWebhook").onclick = async ()=>{
-  const text = $("webhook").textContent;
-  try{ await navigator.clipboard.writeText(text); toast("Скопировано"); return; }catch(e){}
-  const ta = document.createElement("textarea");
-  ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
-  document.body.appendChild(ta); ta.select();
-  try{ document.execCommand("copy"); toast("Скопировано"); }
-  catch(e){ toast(text); }
-  ta.remove();
+$("ytLogin").onclick = async ()=>{
+  const btn = $("ytLogin");
+  btn.disabled = true;
+  try{
+    const r = await api("/api/youtube/login/open");
+    state.loginWaiting = true;
+    state.ytChecked = true;
+    const manual = ' Если окно не открылось — <a href="https://www.youtube.com/" target="_blank" rel="noopener">открой YouTube вручную</a>.';
+    if(r.ok){
+      $("ytHint").innerHTML = "Войди в YouTube в открывшемся окне, затем нажми «Я вошёл»." + manual;
+      toast("Окно входа открыто в браузере");
+    }else{
+      $("ytHint").innerHTML = "Не удалось открыть браузер автоматически. Войди в YouTube на компьютере и нажми «Я вошёл»." + manual;
+      toast(r.error || "Открой YouTube вручную");
+    }
+    updateLoginButtons(state.youtube ? state.youtube.logged_in : false, state.youtube && state.youtube.settings);
+  }catch(e){ toast("Ошибка: " + e.message); }
+  finally{ btn.disabled = false; }
+};
+
+$("ytImport").onclick = async ()=>{
+  const btn = $("ytImport");
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = "Подключаю…";
+  $("ytHint").textContent = "Забираю сессию из браузера. Это может занять до минуты…";
+  try{
+    const r = await api("/api/youtube/login/import");
+    if(r.ok){
+      state.loginWaiting = false;
+      toast("Аккаунт подключён");
+      await loadYouTube({quick:true});
+    }else{
+      toast(r.error || "Вход не найден");
+      $("ytHint").textContent = r.error || "Войди в YouTube и попробуй снова.";
+    }
+  }catch(e){
+    toast("Ошибка: " + e.message);
+    $("ytHint").textContent = "Не удалось подключить аккаунт: " + e.message;
+  }
+  finally{ btn.disabled = false; btn.textContent = old; }
+};
+
+$("ytLogout").onclick = async ()=>{
+  if(!confirm("Отключить аккаунт YouTube в мосте? Приватные плейлисты и «Мне понравилось» перестанут работать, пока не войдёшь снова.")) return;
+  const btn = $("ytLogout");
+  btn.disabled = true;
+  try{
+    const r = await api("/api/youtube/logout");
+    state.loginWaiting = false;
+    state.ytChecked = true;
+    toast(r.removed ? "Сессия удалена" : "Аккаунт отключён");
+    await loadYouTube({quick:true});
+    $("ytHint").textContent = "Аккаунт отключён в мосте, аккаунт в браузере не тронут. Для смены аккаунта войди в нужный аккаунт в Firefox и нажми «Войти» → «Я вошёл».";
+  }catch(e){ toast("Ошибка: " + e.message); }
+  finally{ btn.disabled = false; }
 };
 
 $("ytSave").onclick = async ()=>{
   const btn = $("ytSave");
   btn.disabled = true;
   const qs = new URLSearchParams({
-    browser: $("ytBrowser").value.trim(),
-    cookies_file: $("ytCookiesFile").value.trim(),
     js: $("ytJs").value.trim(),
     limit: $("ytLimit").value || "50",
-    proxy: $("ytProxy").value.trim()
+    proxy: $("ytProxy").value.trim(),
+    native: $("ytNative").checked ? "1" : "0"
   });
   try{
     const r = await api("/api/youtube/settings?" + qs.toString());
