@@ -1013,6 +1013,11 @@ def play_query(query: str) -> dict:
 
     track = items[0]
     queue = items[1:]
+    # Publish the queue as soon as search results are known, so "next" works
+    # while the first track is still downloading.
+    with STATE.lock:
+        STATE.queue = queue
+        STATE.queue_pos = 0
 
     def worker() -> None:
         try:
@@ -1020,8 +1025,6 @@ def play_query(query: str) -> dict:
             with STATE.lock:
                 if gen != STATE.generation:
                     return
-                STATE.queue = queue
-                STATE.queue_pos = 0
             time.sleep(START_DELAY)
             with STATE.lock:
                 if gen != STATE.generation:
@@ -1061,12 +1064,16 @@ def start_query_async(query: str) -> dict:
                 raise RuntimeError("nothing found")
             track = items[0]
             queue = items[1:]
-            path = download(track["id"])
+            # Publish search results immediately, before the first download.
             with STATE.lock:
                 if gen != STATE.generation:
                     return
                 STATE.queue = queue
                 STATE.queue_pos = 0
+            path = download(track["id"])
+            with STATE.lock:
+                if gen != STATE.generation:
+                    return
             time.sleep(START_DELAY)
             with STATE.lock:
                 if gen != STATE.generation:
@@ -1253,6 +1260,7 @@ def _start_track(track: dict, record: bool = True) -> dict:
 
 def play_next() -> dict:
     cancel_playlist_load()
+    native_next = False
     with STATE.lock:
         # If the user went back with "prev", go forward through history first.
         if STATE.history_pos < len(STATE.history) - 1:
@@ -1260,9 +1268,21 @@ def play_next() -> dict:
             track = STATE.history[STATE.history_pos]
             return _start_track(track, record=False)
         if STATE.queue_pos >= len(STATE.queue):
-            return {"ok": False, "error": "queue is empty"}
-        track = STATE.queue[STATE.queue_pos]
-        STATE.queue_pos += 1
+            # A voice-requested track has no YouTube queue.  Ask the Station's
+            # Alice for the next track of the same context; Plan B will
+            # intercept the reply and play it from YouTube.
+            if STATE.track and STATE.track.get("native_id"):
+                native_next = True
+            else:
+                return {"ok": False, "error": "queue is empty"}
+        else:
+            track = STATE.queue[STATE.queue_pos]
+            STATE.queue_pos += 1
+    if native_next:
+        ok = native_text_query("следующий трек")
+        if ok:
+            return {"ok": True, "native": True}
+        return {"ok": False, "error": "не удалось попросить Алису включить следующий трек"}
     return _start_track(track, record=True)
 
 

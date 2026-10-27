@@ -546,7 +546,8 @@ function render(d){
     ? '<path d="M8 5l11 7-11 7z"/>'
     : '<path d="M8 5h3v14H8zm5 0h3v14h-3z"/>';
   $("prev").disabled = !(d.history_pos > 0);
-  $("next").disabled = !(d.queue_len > 0 || d.history_pos < d.history_len - 1);
+  const nativeNext = !!(tr && tr.native_id);
+  $("next").disabled = !(d.queue_len > 0 || d.history_pos < d.history_len - 1 || nativeNext);
   $("spinner").classList.toggle("on", !!d.downloading);
   $("statusText").textContent = d.downloading ? "Ищу и готовлю трек…" : (d.last_error ? "Ошибка: " + d.last_error : "");
 
@@ -737,8 +738,12 @@ async function deleteSaved(item){
   }catch(e){ toast("Ошибка: " + e.message); }
 }
 async function act(path, msg){
-  try{ await api(path); if(msg) toast(msg); refresh(); }
-  catch(e){ toast("Не получилось: " + e.message); }
+  try{
+    const r = await api(path);
+    if(r && r.ok === false){ toast(r.error || "Не получилось"); return; }
+    if(msg) toast(msg);
+    refresh();
+  }catch(e){ toast("Не получилось: " + e.message); }
 }
 
 $("toggle").onclick = ()=>{
