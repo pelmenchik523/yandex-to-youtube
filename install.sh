@@ -130,7 +130,6 @@ print_success "Директория cache создана"
 echo
 echo "Проверка портов..."
 HTTP_PORT=8888
-SKILL_PORT=8889
 
 check_port() {
     if ss -tuln 2>/dev/null | grep -q ":$1 " || netstat -tuln 2>/dev/null | grep -q ":$1 "; then
@@ -142,10 +141,6 @@ check_port() {
 
 if check_port $HTTP_PORT; then
     print_success "Порт $HTTP_PORT свободен (веб-интерфейс)"
-fi
-
-if check_port $SKILL_PORT; then
-    print_success "Порт $SKILL_PORT свободен (webhook Алисы)"
 fi
 
 # Настройка автозапуска (опционально)
@@ -175,8 +170,6 @@ if [ ! -f "settings.json" ]; then
     "js_runtimes": "node",
     "playlist_limit": 50,
     "proxy": "",
-    "default_playlist": "",
-    "skill_name": "ютуб",
     "native_watch": true
 }
 EOF

@@ -3,5 +3,7 @@ playlists.json
 cookies.txt
 station.env
 *.tmp
+*.log
+*.pid
 __pycache__/
 cache/

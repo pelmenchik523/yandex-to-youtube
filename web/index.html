@@ -240,9 +240,6 @@
   .pl-meta{font-size:11.5px;color:var(--muted);flex:0 0 auto}
   .pl-del{border:0;background:transparent;color:var(--muted);cursor:pointer;font-size:16px;padding:2px 5px;border-radius:8px}
   .pl-del:hover{color:var(--bad);background:rgba(255,92,122,.08)}
-  .pl-star{border:0;background:transparent;color:var(--muted);cursor:pointer;font-size:15px;padding:2px 4px;border-radius:8px;line-height:1}
-  .pl-star:hover{background:rgba(255,255,255,.07)}
-  .pl-star.on{color:#ffd166}
   @media(max-width:600px){
     .yt-grid{grid-template-columns:1fr}
     .account{flex-wrap:wrap}
@@ -432,7 +429,6 @@
         <div class="queue-head" style="display:flex"><span>Сохранённые плейлисты</span><span id="plCount"></span></div>
         <div class="pl-list" id="plSaved"><div class="empty">Пока нет сохранённых плейлистов</div></div>
         <div class="note" id="plNow"></div>
-        <div class="note">★ — основной плейлист. Он играет при голосовом запуске музыки и через API.</div>
       </section>
     </div>
 
@@ -488,7 +484,7 @@
 <script>window.__INITIAL_STATE__ = null;</script>
 <script>
 const $ = (id) => document.getElementById(id);
-const state = { data:{}, ledEditing:0, volumeTimer:0, ledTimer:0, fails:0, poweringOff:false, ytLoaded:false, ytDefault:"", ytPlaylists:[], loginWaiting:false, ytChecked:false };
+const state = { data:{}, ledEditing:0, volumeTimer:0, ledTimer:0, fails:0, poweringOff:false, ytLoaded:false, ytPlaylists:[], loginWaiting:false, ytChecked:false };
 
 function fmt(sec){
   sec = Math.max(0, Math.floor(Number(sec)||0));
@@ -617,14 +613,6 @@ function hexToRgb(hex){
 function renderSaved(items){
   const box = $("plSaved");
   state.ytPlaylists = items;
-  const defRef = String(state.ytDefault || "").toLowerCase();
-  let defId = "";
-  if(defRef){
-    const hit = items.find(x=>[x.id, x.url, x.name].some(v=>String(v||"").toLowerCase()===defRef));
-    defId = hit ? hit.id : "";
-  } else if(items.length){
-    defId = items[0].id;
-  }
   $("plCount").textContent = items.length ? items.length + " сохранено" : "";
   if(!items.length){
     box.innerHTML = '<div class="empty">Пока нет сохранённых плейлистов</div>';
@@ -641,31 +629,15 @@ function renderSaved(items){
     const meta = document.createElement("div");
     meta.className = "pl-meta";
     meta.textContent = item.count ? item.count + " треков" : "";
-    const isDefault = item.id === defId;
-    const star = document.createElement("button");
-    star.className = "pl-star" + (isDefault ? " on" : "");
-    star.title = isDefault ? "Основной плейлист" : "Сделать основным";
-    star.textContent = isDefault ? "★" : "☆";
-    star.onclick = (e)=>{ e.stopPropagation(); setDefaultPlaylist(isDefault ? "" : item.id); };
     const del = document.createElement("button");
     del.className = "pl-del";
     del.title = "Удалить из сохранённых";
     del.textContent = "×";
     del.onclick = (e)=>{ e.stopPropagation(); deleteSaved(item); };
-    row.append(star, name, meta, del);
+    row.append(name, meta, del);
     row.onclick = ()=> playPlaylist(item.url || item.id, item.name || "");
     box.append(row);
   });
-}
-
-async function setDefaultPlaylist(id){
-  try{
-    const r = await api("/api/youtube/settings?default_playlist=" + encodeURIComponent(id || ""));
-    if(!r.ok){ toast(r.error || "Не удалось сохранить"); return; }
-    state.ytDefault = (r.settings && r.settings.default_playlist) || "";
-    toast(id ? "Основной плейлист обновлён" : "Основной плейлист сброшен");
-    renderSaved(state.ytPlaylists || []);
-  }catch(e){ toast("Ошибка: " + e.message); }
 }
 
 function updateLoginButtons(logged, settings){
@@ -684,7 +656,6 @@ function applyYouTubeStatus(d){
   $("ytLimit").value = s.playlist_limit || 50;
   $("ytProxy").value = s.proxy || "";
   $("ytNative").checked = !!s.native_watch;
-  state.ytDefault = s.default_playlist || "";
 
   const avatar = $("ytAvatar"), dot = $("ytDot");
   avatar.classList.toggle("on", logged === true);

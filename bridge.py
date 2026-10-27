@@ -3,10 +3,11 @@
 YouTube -> Yandex Station Lite 2 bridge.
 
 Audio path:
-    yt-dlp (search/download) -> MP3 file -> local HTTP server -> Station playbin
+    yt-dlp (search/download) -> audio file -> local HTTP server -> Station playbin
 
 Control path:
-    Alice skill webhook (HTTPS tunnel) -> this process -> SSH -> maind --gst-launch
+    web UI / HTTP API -> this process -> SSH -> maind --gst-launch
+    voice interception (Plan B) -> this process -> SSH -> maind --gst-launch
 
 Run:
     python3 bridge.py
@@ -40,11 +41,9 @@ STATION_PORT = int(os.environ.get("STATION_PORT", "2222"))
 STATION_USER = os.environ.get("STATION_USER", "root")
 STATION_GST = "/system/vendor/quasar/maind --gst-launch"
 HTTP_PORT = int(os.environ.get("HTTP_PORT", "8888"))
-SKILL_PORT = int(os.environ.get("SKILL_PORT", "8889"))
 PLAYER_MODE = os.environ.get("PLAYER_MODE", "gst")  # gst | glagol (glagol not implemented yet)
 START_DELAY = float(os.environ.get("START_DELAY", "2.0"))
 AUTO_NEXT = os.environ.get("AUTO_NEXT", "1") == "1"
-PUBLIC_URL = os.environ.get("PUBLIC_URL", "").rstrip("/")
 
 SETTINGS_FILE = Path(os.environ.get("BRIDGE_SETTINGS_FILE", str(BASE / "settings.json")))
 PLAYLISTS_FILE = Path(os.environ.get("BRIDGE_PLAYLISTS_FILE", str(BASE / "playlists.json")))
@@ -58,10 +57,6 @@ DEFAULT_SETTINGS = {
     "playlist_limit": 50,
     # Optional: http://host:port or socks5://host:port for blocked YouTube.
     "proxy": "",
-    # Playlist started when the skill is opened without a command.
-    "default_playlist": "",
-    # Used to strip "запусти навык <name>" from Alice commands.
-    "skill_name": "ютуб",
     # Plan B: intercept the Station's native Alice music and play YouTube.
     "native_watch": True,
 }
@@ -129,8 +124,6 @@ def public_settings(settings: dict | None = None) -> dict:
         "js_runtimes": str(s.get("js_runtimes") or ""),
         "playlist_limit": limit,
         "proxy": str(s.get("proxy") or ""),
-        "default_playlist": str(s.get("default_playlist") or ""),
-        "skill_name": str(s.get("skill_name") or ""),
         "native_watch": as_bool(s.get("native_watch"), True),
     }
 
@@ -148,8 +141,6 @@ def update_youtube_settings(patch: dict) -> dict:
         "js_runtimes",
         "playlist_limit",
         "proxy",
-        "default_playlist",
-        "skill_name",
         "native_watch",
         "native_auto_next",
     }
@@ -197,28 +188,6 @@ def ytdlp_base(settings: dict | None = None, include_cookies: bool = True) -> li
     if include_cookies:
         args += ytdlp_cookie_args(s)
     return args
-
-
-def current_public_url() -> str:
-    """Public base URL of the skill webhook.
-
-    Priority: explicit "public_url" setting (the stable Tailscale Funnel
-    address), then the newest localhost.run URL from its log.
-    """
-    try:
-        fixed = str(load_settings().get("public_url") or "").strip().rstrip("/")
-        if fixed:
-            return fixed
-    except Exception:
-        pass
-    try:
-        log = (BASE / "localhostrun.log").read_text(encoding="utf-8", errors="ignore")
-        urls = re.findall(r"https://[a-z0-9]+\.lhr\.life", log)
-        if urls:
-            return urls[-1].rstrip("/")
-    except OSError:
-        pass
-    return PUBLIC_URL
 
 
 def lan_ip() -> str:
@@ -336,8 +305,9 @@ class State:
     def stop_async(self) -> int:
         """Clear state immediately and stop the old gst process in background.
 
-        Used by the Alice webhook so the answer never waits for SSH.  Only the
-        old PID is killed, so a delayed background kill cannot hit a new track.
+        Used by async playlist/query starts so the web UI never waits for SSH.
+        Only the old PID is killed, so a delayed background kill cannot hit a
+        new track.
         """
         with self.lock:
             old_pid = self.pid
@@ -404,7 +374,6 @@ class State:
                 "volume": self.volume,
                 "amp_on": self.amp_on,
                 "led": dict(self.led),
-                "public_url": current_public_url(),
             }
 
 
@@ -589,29 +558,8 @@ def delete_playlist(playlist_id: str) -> dict:
         return {"ok": False, "error": "Не указан плейлист."}
     items = [x for x in load_playlists() if x.get("id") != pid]
     _write_playlists(items)
-    setting = str(load_settings().get("default_playlist") or "").strip()
-    if setting and setting == pid:
-        save_settings({"default_playlist": items[0]["id"] if items else ""})
     _invalidate_yt_status()
     return {"ok": True, "playlists": items}
-
-
-def default_playlist_item() -> dict | None:
-    """Playlist Alice starts when the skill is opened without a command.
-
-    The setting can hold a saved id, a URL, or a name; an empty setting means
-    "the first saved playlist".
-    """
-    saved = load_playlists()
-    ref = str(load_settings().get("default_playlist") or "").strip()
-    if not ref:
-        return saved[0] if saved else None
-    low = ref.lower()
-    for item in saved:
-        if low in (item["id"].lower(), item["url"].lower(), item["name"].lower()):
-            return item
-    url = ref if ref.startswith("http") else f"https://www.youtube.com/playlist?list={ref}"
-    return {"id": ref, "url": url, "name": "", "count": 0, "added": 0}
 
 
 def _probe_youtube_login(
@@ -1033,8 +981,8 @@ def _auto_next(gen: int) -> None:
 def play_query(query: str) -> dict:
     """Synchronous search, then download+play in the background.
 
-    Used by the manual /play endpoint.  The Alice webhook uses
-    start_query_async() instead, because private skills must answer quickly.
+    Used by the legacy /play endpoint.  The web UI uses start_query_async()
+    so the request returns immediately.
     """
     query = query.strip()
     if not query:
@@ -1092,7 +1040,7 @@ def play_query(query: str) -> dict:
 
 
 def start_query_async(query: str) -> dict:
-    """Fast path for the Alice skill: answer now, work in the background."""
+    """Fast path for the web UI: return immediately, work in the background."""
     query = query.strip()
     if not query:
         return {"ok": False, "error": "empty query"}
@@ -1100,7 +1048,7 @@ def start_query_async(query: str) -> dict:
     # A new search cancels any playlist that is still being fetched.
     cancel_playlist_load()
     # Clear state immediately; the old gst process is killed in background
-    # so the Alice webhook does not wait for SSH.
+    # so the HTTP request does not wait for SSH.
     gen = STATE.stop_async()
     with STATE.lock:
         STATE.downloading = True
@@ -1648,192 +1596,6 @@ def serve_audio(handler: BaseHTTPRequestHandler, path: Path) -> None:
                 remaining -= len(chunk)
     except (BrokenPipeError, ConnectionResetError):
         pass
-
-
-def alice_reply(text: str, end: bool = False) -> dict:
-    return {
-        "response": {"text": text, "tts": text, "end_session": end},
-        "version": "1.0",
-    }
-
-
-def strip_query(command: str) -> str:
-    q = command.lower().strip(" .!?,")
-    q = re.sub(r"^(алиса[,\s]+)?", "", q)
-    q = re.sub(r"^(пожалуйста[,\s]+)?", "", q)
-    q = re.sub(
-        r"^(включи|включай|поставь|вруби|запусти|играй|найди|сыграй|давай|давай-ка)\s+",
-        "",
-        q,
-    )
-    q = re.sub(r"^(на\s+)?(ютубе|ютьюбе|youtube|ютубе|ютуб)\s+", "", q)
-    q = re.sub(r"^(песню|трек|композицию|музыку)\s+", "", q)
-    q = re.sub(r"\s+(на\s+)?(ютубе|ютьюбе|youtube)$", "", q)
-    return q.strip(" .!?,")
-
-
-# "Алиса, запусти навык ютуб", "спроси ютуб ...", "сыграем в ютуб".
-_SKILL_LAUNCH_RES = (
-    re.compile(
-        r"^(?:алиса[,\s]+)?(?:запусти|открой|включи|вруби)\s+"
-        r"(?:навык|чат\s+с|скилл)\s*(.*)$"
-    ),
-    re.compile(r"^(?:алиса[,\s]+)?навык\s+(.*)$"),
-    re.compile(r"^(?:алиса[,\s]+)?(?:давай\s+поиграем|сыграем|поиграем)\s+в\s+(.*)$"),
-    re.compile(r"^(?:алиса[,\s]+)?(?:спроси|скажи|узнай|попроси)(?:\s+у)?\s+(.*)$"),
-)
-
-# Phrases that mean "just start the default playlist".
-_DEFAULT_QUERIES = {
-    "музыку",
-    "музыка",
-    "музыки",
-    "что-нибудь",
-    "что нибудь",
-    "ютуб",
-    "ютьюб",
-    "youtube",
-    "основной плейлист",
-    "основное",
-}
-
-
-def strip_skill_prefix(text: str) -> str:
-    """Drop the activation wrapper so "запусти навык ютуб" becomes empty."""
-    low = text.lower().strip(" .!?,")
-    for rx in _SKILL_LAUNCH_RES:
-        m = rx.match(low)
-        if not m:
-            continue
-        rest = m.group(1).strip(" .!?,")
-        names = {
-            str(load_settings().get("skill_name") or "").strip().lower(),
-            "ютуб",
-            "ютьюб",
-            "youtube",
-        }
-        words = rest.split()
-        while words and words[0].strip(" .,!?") in names:
-            words.pop(0)
-        return " ".join(words).strip(" .!?,")
-    return low
-
-
-def start_default_playlist_reply(prefix: str = "Включаю") -> dict:
-    item = default_playlist_item()
-    if not item:
-        return alice_reply(
-            "Скажи, что включить. Например: включи Моргенштерна, "
-            "или включи любимые."
-        )
-    r = start_playlist_async(item["url"], name=item.get("name") or "")
-    if not r.get("ok"):
-        return alice_reply(f"Не получилось: {r.get('error', 'ошибка')}")
-    name = item.get("name") or "YouTube"
-    return alice_reply(f"{prefix} плейлист «{name}».")
-
-
-def handle_alice(body: dict) -> dict:
-    req = body.get("request") or {}
-    command = (req.get("command") or req.get("original_utterance") or "").strip()
-    low = strip_skill_prefix(command) if command else ""
-
-    if re.search(r"\b(выйти|выйди|выход|закрой навык|закончи|закончить|отключись)\b", low):
-        return alice_reply("Выхожу. Музыка продолжит играть.", end=True)
-
-    if not low:
-        return start_default_playlist_reply()
-
-    if re.search(r"\b(стоп|останови|выключи|хватит)\b", low):
-        STATE.stop()
-        return alice_reply("Остановил.")
-
-    if re.search(r"\b(пауза|приостанови|замри)\b", low):
-        r = pause()
-        return alice_reply("Пауза." if r.get("ok") else "Сейчас ничего не играет.")
-
-    if re.search(r"\b(продолжи|продолжай|возобнови)\b", low):
-        r = resume()
-        return alice_reply("Продолжаю." if r.get("ok") else "Сейчас ничего не играет.")
-
-    if re.search(r"\b(назад|предыдущий|предыдущую|верни)\b", low):
-        r = play_prev()
-        if r.get("ok"):
-            return alice_reply(f"Включаю {r['track']['title']}.")
-        return alice_reply("Это был первый трек.")
-
-    if re.search(r"\b(дальше|следующий|следующую|переключи|некст)\b", low):
-        r = play_next()
-        if r.get("ok"):
-            return alice_reply(f"Включаю {r['track']['title']}.")
-        return alice_reply("Очередь пуста. Скажи, что включить.")
-
-    m = re.search(r"громкость\s+(\d{1,3})", low)
-    if m:
-        duck()
-        r = set_volume(absolute=int(m.group(1)))
-        return alice_reply(f"Громкость {r['volume']} процентов.")
-    if re.search(r"\b(громче|прибавь)\b", low):
-        duck()
-        r = set_volume(delta=10)
-        return alice_reply(f"Громкость {r['volume']} процентов.")
-    if re.search(r"\b(тише|убавь)\b", low):
-        duck()
-        r = set_volume(delta=-10)
-        return alice_reply(f"Громкость {r['volume']} процентов.")
-
-    if re.search(r"\b(что играет|что сейчас|статус)\b", low):
-        duck()
-        st = STATE.status()
-        if st.get("track"):
-            return alice_reply(f"Играет {st['track']['title']}.")
-        return alice_reply("Сейчас ничего не играет.")
-
-    if re.search(r"\b(помощь|что ты умеешь|команды)\b", low):
-        return alice_reply(
-            "Скажи: включи название трека. Ещё умею: пауза, продолжи, дальше, стоп, громче, тише."
-        )
-
-    if re.search(r"\b(плейлист|любимые|любимое|понравилось|смотреть позже|watch later)\b", low):
-        if re.search(r"\bосновн\w*\b", low):
-            return start_default_playlist_reply()
-        ref = ""
-        name = ""
-        if "позже" in low or "watch later" in low:
-            ref, name = "WL", "Смотреть позже"
-        elif "понрав" in low or "любим" in low:
-            ref, name = "LL", "Мне понравилось"
-        else:
-            words = re.sub(
-                r"\b(алиса|включи|включай|поставь|вруби|запусти|плейлист|пожалуйста|мне|мой|мою)\b",
-                " ",
-                low,
-            )
-            words = re.sub(r"\s+", " ", words).strip(" .!?,")
-            for item in load_playlists():
-                nm = str(item.get("name") or "").lower()
-                if nm and (nm in low or (words and (words in nm or nm in words))):
-                    ref = str(item.get("url") or item.get("id") or "")
-                    name = str(item.get("name") or "")
-                    break
-        if ref:
-            r = start_playlist_async(ref, name=name)
-            if r.get("ok"):
-                return alice_reply(f"Включаю плейлист «{name or 'YouTube'}».")
-            return alice_reply(f"Не получилось: {r.get('error', 'ошибка')}")
-        return alice_reply(
-            "Какой плейлист включить? Скажи «включи любимые» "
-            "или «включи смотреть позже»."
-        )
-
-    query = strip_query(low)
-    if not query or query in _DEFAULT_QUERIES:
-        return start_default_playlist_reply()
-
-    r = start_query_async(query)
-    if not r.get("ok"):
-        return alice_reply("Не понял, что включить. Повтори название трека.")
-    return alice_reply("Ищу и включаю.")
 
 
 # ---------------------------------------------------------------------------
@@ -2759,29 +2521,10 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _is_skill_server(self) -> bool:
-        return self.server.server_port == SKILL_PORT
-
     def do_GET(self) -> None:
         u = urllib.parse.urlparse(self.path)
         p = u.path
         qs = urllib.parse.parse_qs(u.query)
-
-        if self._is_skill_server():
-            if p == "/health":
-                self._json({"ok": True, "role": "alice-webhook"})
-            else:
-                # A browser hit on the webhook address: useful for diagnosing a
-                # wrong path in the skill settings.
-                self._json(
-                    {
-                        "ok": True,
-                        "role": "alice-webhook",
-                        "hint": "POST /alice is the skill endpoint",
-                        "path": p,
-                    }
-                )
-            return
 
         if p in ("/", "/index.html"):
             self._html(WEB_DIR / "index.html")
@@ -2894,10 +2637,6 @@ class Handler(BaseHTTPRequestHandler):
                 patch["playlist_limit"] = (qs.get("limit") or ["50"])[0]
             if "proxy" in qs:
                 patch["proxy"] = (qs.get("proxy") or [""])[0]
-            if "default_playlist" in qs:
-                patch["default_playlist"] = (qs.get("default_playlist") or [""])[0]
-            if "skill_name" in qs:
-                patch["skill_name"] = (qs.get("skill_name") or [""])[0]
             if "native" in qs:
                 patch["native_watch"] = (qs.get("native") or ["1"])[0] not in ("0", "false", "off")
             self._json(update_youtube_settings(patch))
@@ -2941,39 +2680,6 @@ class Handler(BaseHTTPRequestHandler):
 
         self.send_error(404)
 
-    def do_POST(self) -> None:
-        u = urllib.parse.urlparse(self.path)
-        length = int(self.headers.get("Content-Length") or 0)
-        raw = self.rfile.read(length) if length else b"{}"
-        try:
-            body = json.loads(raw.decode("utf-8"))
-        except Exception:
-            body = {}
-
-        if self._is_skill_server() or u.path == "/alice":
-            # Any path on the public webhook port is treated as the skill
-            # endpoint: the URL in the developer console may be pasted with or
-            # without "/alice". Only real Alice payloads are answered, so
-            # random internet scanners cannot start playback.
-            looks_alice = isinstance(body, dict) and (
-                "request" in body or "session" in body or "version" in body
-            )
-            if not looks_alice:
-                self.send_error(404)
-                return
-            print(
-                f"alice request: path={u.path} ua={self.headers.get('User-Agent', '')!r}",
-                flush=True,
-            )
-            try:
-                self._json(handle_alice(body))
-            except Exception as exc:
-                print("alice error:", exc, flush=True)
-                self._json(alice_reply("Что-то пошло не так. Попробуй ещё раз."))
-            return
-
-        self.send_error(404)
-
 
 def main() -> None:
     print(f"yt-dlp: {YTDLP}")
@@ -2999,7 +2705,6 @@ def main() -> None:
             STATE.volume = volume_query()
 
     audio = ThreadingHTTPServer(("0.0.0.0", HTTP_PORT), Handler)
-    skill = ThreadingHTTPServer(("0.0.0.0", SKILL_PORT), Handler)
 
     threading.Thread(target=native_watch_loop, daemon=True).start()
     threading.Thread(target=lambda: ssh(KILL_GST, timeout=10), daemon=True).start()
@@ -3012,16 +2717,11 @@ def main() -> None:
     else:
         print("native: interception disabled in settings")
 
-    threading.Thread(target=audio.serve_forever, daemon=True).start()
     print(f"web ui:       http://{PC_IP}:{HTTP_PORT}/")
     print(f"audio/control: http://{PC_IP}:{HTTP_PORT}/api/status")
-    print(f"alice webhook: http://{PC_IP}:{SKILL_PORT}/alice")
-    public_url = current_public_url()
-    if public_url:
-        print(f"public skill: {public_url}/alice")
 
     try:
-        skill.serve_forever()
+        audio.serve_forever()
     except KeyboardInterrupt:
         pass
 
