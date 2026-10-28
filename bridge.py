@@ -1768,13 +1768,12 @@ def serve_audio(handler: BaseHTTPRequestHandler, path: Path) -> None:
 # ---------------------------------------------------------------------------
 # Plan B: play YouTube instead of the Station's native Alice music
 #
-# The Station's local unbound resolves *.strm.yandex.net to 127.0.0.1, so the
-# native Yandex audio never actually sounds.  platformd still receives the
-# AUDIO_PLAY directive from Alice and writes the Yandex Music track id to
-# maind.log.  We resolve that id to "artist title" through the Music API (via
-# an SSH SOCKS tunnel, because the PC exits through a non-RU VPN and the API
-# answers 451 there), search YouTube and play the result with the same
-# maind --gst-launch path the rest of the bridge uses.
+# setup-station-dns.sh points *.strm.yandex.net at 127.0.0.1 on the Station,
+# so native Yandex Music audio never actually sounds.  platformd still receives
+# the AUDIO_PLAY directive from Alice and writes the Yandex Music track id to
+# maind.log.  The bridge uses the recognised voice phrase, searches YouTube and
+# plays the result with the same maind --gst-launch path the rest of the bridge
+# uses.  The Yandex Music API is not used.
 #
 # Alice's own voice commands keep producing the usual directives ("пауза" =>
 # player_pause, "громче" => volume, "следующий трек" => a new audio_play), so
@@ -2390,7 +2389,10 @@ def native_prepare_generic(prep: dict) -> None:
     # 3. Last online fallback: a plain music search.
     if not entries:
         print("native: generic request -> YouTube search 'музыка'", flush=True)
-        entries = yt_search("музыка", limit=10, timeout=8)
+        try:
+            entries = yt_search("музыка", limit=10, timeout=8)
+        except Exception as exc:
+            print(f"native: generic YouTube search failed: {exc}", flush=True)
 
     if not entries:
         if native_prepare_cached(prep):
@@ -2544,6 +2546,21 @@ def native_mediad_pid(force: bool = False) -> int:
     return pid
 
 
+def _freeze_native_pid(pid: int, gen: int, seconds: float) -> bool:
+    """SIGSTOP one exact mediad PID and arm its remote thaw watchdog."""
+    proc = ssh(
+        f"c=$(tr '\\0' ' ' < /proc/{pid}/cmdline 2>/dev/null); "
+        f'case "$c" in *"maind --mediad"*) ;; *) exit 4;; esac; '
+        f"echo {gen} > /tmp/yt_native_freeze_gen; "
+        f"kill -STOP {pid} 2>/dev/null || exit 5; "
+        f"nohup sh -c 'sleep {int(max(2, seconds))}; "
+        f'[ "$(cat /tmp/yt_native_freeze_gen 2>/dev/null)" = "{gen}" ] '
+        f"&& kill -CONT {pid} 2>/dev/null' >/dev/null 2>&1 & true",
+        timeout=8,
+    )
+    return proc.returncode == 0
+
+
 def native_freeze(seconds: float = 10.0) -> bool:
     """Freeze the native audio daemon (SIGSTOP) without touching our player.
 
@@ -2551,25 +2568,23 @@ def native_freeze(seconds: float = 10.0) -> bool:
     keeps sounding while mediad (Alice TTS + native music) is stopped.  A
     remote watchdog resumes mediad even if the bridge dies.
     """
-    pid = native_mediad_pid()
-    if not pid:
-        return False
-    try:
-        gen = int(time.time() * 1000)
-        # Stop the audio before spawning the watchdog: the fewer remote
-        # processes between the SSH command and kill -STOP, the smaller the
-        # audible native fragment.
-        ssh(
-            f"echo {gen} > /tmp/yt_native_freeze_gen; "
-            f"[ -d /proc/{pid} ] && kill -STOP {pid} 2>/dev/null; "
-            f"nohup sh -c 'sleep {int(max(2, seconds))}; "
-            f'[ "$(cat /tmp/yt_native_freeze_gen 2>/dev/null)" = "{gen}" ] '
-            f"&& kill -CONT {pid} 2>/dev/null' >/dev/null 2>&1 & true",
-            timeout=8,
-        )
-        return True
-    except Exception:
-        return False
+    gen = int(time.time() * 1000)
+    last_exc = ""
+    for force in (False, True):
+        pid = native_mediad_pid(force=force)
+        if not pid:
+            continue
+        try:
+            if _freeze_native_pid(pid, gen, seconds):
+                with NATIVE_LOCK:
+                    NATIVE_MEDIA["pid"] = pid
+                    NATIVE_MEDIA["at"] = time.time()
+                return True
+        except Exception as exc:
+            last_exc = str(exc)[:120]
+    if last_exc:
+        print(f"native: freeze failed: {last_exc}", flush=True)
+    return False
 
 
 def native_thaw() -> None:
@@ -2638,32 +2653,23 @@ def native_activate(sid: str, prep: dict) -> None:
             with NATIVE_LOCK:
                 NATIVE["prep"].pop(sid, None)
             return
-        # Silence the native track first.  If our own music is playing, freeze
-        # mediad and leave the amplifier on: the old track keeps playing until
-        # the new file is ready, then we switch without a silent gap.  If
-        # nothing is playing, just mute the amp.
-        preserve = bool(STATE.pid and not STATE.paused)
+        # Silence the native track first.  Freezing mediad leaves our own gst
+        # process alone, so already-playing YouTube audio keeps sounding until
+        # the new file is ready.  If freeze fails, mute the amplifier instead.
         t0 = time.time()
-        if preserve:
-            frozen = native_freeze(12.0)
-            if not frozen:
-                # Fallback if mediad could not be frozen: mute as before.
-                try:
-                    amp_set(False)
-                    muted = True
-                except Exception:
-                    pass
-            print(
-                f"native: froze native audio in {time.time() - t0:.2f}s, pause sent",
-                flush=True,
-            )
-        else:
+        frozen = native_freeze(12.0)
+        if not frozen:
+            # Fallback if mediad could not be frozen: mute the amplifier.
             try:
                 amp_set(False)
                 muted = True
             except Exception:
                 pass
-            print(f"native: mute in {time.time() - t0:.2f}s, pause sent", flush=True)
+        print(
+            f"native: {'froze native audio' if frozen else 'mute'} "
+            f"in {time.time() - t0:.2f}s, pause sent",
+            flush=True,
+        )
         with NATIVE_LOCK:
             NATIVE["self_pause_until"] = time.time() + 4.0
         sent = time.time()

@@ -120,6 +120,17 @@ else
     exit 1
 fi
 
+# Plan B: native Yandex Music streams must not sound.  Keep TTS intact and
+# answer only *.strm.yandex.net with 127.0.0.1.
+if [ -x ./setup-station-dns.sh ]; then
+    print_info "Блокирую нативные аудиопотоки Яндекс Музыки на станции..."
+    if ./setup-station-dns.sh; then
+        print_success "Нативная Яндекс Музыка отключена на уровне DNS"
+    else
+        print_info "Не удалось настроить DNS-блокировку; мост всё равно будет глушить плеер Алисы."
+    fi
+fi
+
 # Создание директорий
 echo
 echo "Создание директорий..."
@@ -193,7 +204,7 @@ fi
 # Сделать скрипты исполняемыми
 echo
 echo "Сделать скрипты исполняемыми..."
-chmod +x start.sh stop.sh install.sh
+chmod +x start.sh stop.sh install.sh setup-station-dns.sh
 print_success "Скрипты установлены"
 
 echo
