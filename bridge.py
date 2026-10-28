@@ -389,13 +389,13 @@ def cancel_playlist_load() -> None:
             STATE.downloading = False
 
 
-def yt_search(query: str, limit: int = 1) -> list[dict]:
+def yt_search(query: str, limit: int = 1, timeout: int = 45) -> list[dict]:
     cmd = ytdlp_base() + [
         "--flat-playlist",
         "--print", "%(id)s\t%(title)s\t%(duration)s",
         f"ytsearch{limit}:{query}",
     ]
-    out = subprocess.check_output(cmd, text=True, timeout=45, stderr=subprocess.DEVNULL)
+    out = subprocess.check_output(cmd, text=True, timeout=timeout, stderr=subprocess.DEVNULL)
     items = []
     for line in out.splitlines():
         parts = line.split("\t")
@@ -409,6 +409,85 @@ def yt_search(query: str, limit: int = 1) -> list[dict]:
 
 
 _PLAYLIST_ID_RE = re.compile(r"[?&]list=([A-Za-z0-9_-]+)")
+
+
+def yt_mix(video_id: str, limit: int = 25, timeout: int = 90) -> list[dict]:
+    """YouTube Music mix seeded by one video (the auto-generated RD playlist)."""
+    vid = (video_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{6,}", vid):
+        return []
+    try:
+        max_items = max(1, min(100, int(limit or 25)))
+    except (TypeError, ValueError):
+        max_items = 25
+    settings = load_settings()
+    cmd = ytdlp_base(settings) + [
+        "--flat-playlist",
+        "--ignore-errors",
+        "--playlist-end", str(max_items),
+        "--print", "%(id)s\t%(title)s\t%(duration)s",
+        f"https://www.youtube.com/playlist?list=RD{vid}",
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        print(f"mix: timeout for {vid}", flush=True)
+        return []
+    entries: list[dict] = []
+    seen: set[str] = set()
+    for line in (proc.stdout or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2 or not parts[0].strip():
+            continue
+        item_id = parts[0].strip()
+        if item_id == vid or item_id in seen:
+            continue
+        seen.add(item_id)
+        try:
+            duration = (
+                float(parts[2])
+                if len(parts) > 2 and parts[2] not in ("NA", "None", "")
+                else 0.0
+            )
+        except ValueError:
+            duration = 0.0
+        entries.append(
+            {
+                "id": item_id,
+                "title": parts[1].strip() or item_id,
+                "duration": duration,
+            }
+        )
+    return entries
+
+
+def schedule_mix(video_id: str, limit: int = 25) -> None:
+    """Fetch a mix in the background and use it as the queue for this track."""
+    vid = (video_id or "").strip()
+    if not vid:
+        return
+
+    def worker() -> None:
+        try:
+            items = yt_mix(vid, limit=limit)
+        except Exception as exc:
+            print(f"mix: {vid}: {exc}", flush=True)
+            return
+        if not items:
+            print(f"mix: no tracks for {vid}", flush=True)
+            return
+        with STATE.lock:
+            current = STATE.track or {}
+            if str(current.get("id") or "") != vid or STATE.playlist:
+                return
+            STATE.queue = items
+            STATE.queue_pos = 0
+        print(
+            f"[{time.strftime('%H:%M:%S')}] mix: {len(items)} tracks after {vid}",
+            flush=True,
+        )
+
+    threading.Thread(target=worker, daemon=True).start()
 
 
 def parse_playlist_ref(ref: str) -> dict:
@@ -439,7 +518,12 @@ def parse_playlist_ref(ref: str) -> dict:
     }
 
 
-def fetch_playlist(ref: str, limit: int | None = None, fallback_name: str = "") -> dict:
+def fetch_playlist(
+    ref: str,
+    limit: int | None = None,
+    fallback_name: str = "",
+    timeout: int = 180,
+) -> dict:
     """Read the first `limit` entries of a playlist, including private ones."""
     p = parse_playlist_ref(ref)
     settings = load_settings()
@@ -457,9 +541,9 @@ def fetch_playlist(ref: str, limit: int | None = None, fallback_name: str = "") 
         p["url"],
     ]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        raise RuntimeError("Плейлист не успел загрузиться за 3 минуты.")
+        raise RuntimeError("Плейлист не успел загрузиться.")
 
     entries: list[dict] = []
     playlist_title = ""
@@ -1029,6 +1113,7 @@ def play_query(query: str) -> dict:
                 if gen != STATE.generation:
                     return
             _play_file(path, track)
+            schedule_mix(track["id"])
         except Exception as exc:
             with STATE.lock:
                 STATE.last_error = f"download/play: {exc}"
@@ -1078,6 +1163,7 @@ def start_query_async(query: str) -> dict:
                 if gen != STATE.generation:
                     return
             _play_file(path, track)
+            schedule_mix(track["id"])
         except Exception as exc:
             with STATE.lock:
                 if gen == STATE.generation:
@@ -1694,6 +1780,26 @@ def native_next_command(text: str) -> bool:
     return low in NATIVE_NEXT_COMMANDS
 
 
+NATIVE_GENERIC_REQUESTS = {
+    "музыку", "музыка", "музыки", "что-нибудь", "что нибудь", "что-то",
+    "что то", "послушать музыку", "мою волну", "моя волна", "песню",
+    "песня", "трек", "композицию",
+}
+
+
+def native_generic_music_command(text: str) -> bool:
+    """True for "включи музыку" without a concrete song or artist."""
+    low = " ".join((text or "").casefold().replace("ё", "е").strip(" .!,").split())
+    low = re.sub(
+        r"^(?:а|ну|давай|мне|включи|поставь|вруби|запусти|сыграй|найди)\s+",
+        "",
+        low,
+    )
+    low = re.sub(r"\s+пожалуйста$", "", low)
+    low = re.sub(r"^(?:мне|пожалуйста)\s+", "", low)
+    return low in NATIVE_GENERIC_REQUESTS
+
+
 def native_local_next(source: str = "voice") -> None:
     """Switch to the next YouTube queue item without asking Yandex Music."""
     now = time.time()
@@ -1774,6 +1880,33 @@ def native_on_voice_text(text: str) -> None:
                 NATIVE["continuing"][sid] = time.time() + 10.0
         resume()
         return
+    if native_generic_music_command(text):
+        now = time.time()
+        with NATIVE_LOCK:
+            NATIVE["local_switch_until"] = 0.0
+            NATIVE["next_handled_at"] = 0.0
+            NATIVE["suppress_until"] = 0.0
+            timer = NATIVE.get("voice_timer")
+            if timer is not None:
+                try:
+                    timer.cancel()
+                except Exception:
+                    pass
+            NATIVE["voice_timer"] = None
+            NATIVE["voice"] = {
+                "text": text,
+                "query": "",
+                "generic": True,
+                "at": now,
+                "done": False,
+                "token": f"{now:.3f}",
+            }
+        print(
+            f"native: heard generic music request '{text}', using local queue/mix",
+            flush=True,
+        )
+        return
+
     query = native_music_query(text)
     if not query:
         return
@@ -1854,6 +1987,7 @@ def native_voice_fallback(token: str) -> None:
             STATE.playlist = None
         time.sleep(0.2)
         _play_file(path, track)
+        schedule_mix(track["id"])
         print(
             f"[{time.strftime('%H:%M:%S')}] native: fallback playing {track['title']}",
             flush=True,
@@ -1891,11 +2025,14 @@ def native_on_prefetch(stream_id: str, late: bool = False) -> None:
         # the phrase Alice just recognised; the stream id is only a marker.
         voice = NATIVE.get("voice") or {}
         voice_query = ""
+        generic = False
         if voice and now - float(voice.get("at") or 0.0) < 30.0:
             voice_query = str(voice.get("query") or "").strip()
+            generic = bool(voice.get("generic"))
         prep = {
             "id": stream_id,
             "query": voice_query,
+            "generic": generic,
             "track": None,
             "path": None,
             "error": "",
@@ -1907,18 +2044,87 @@ def native_on_prefetch(stream_id: str, late: bool = False) -> None:
         NATIVE["prep"][stream_id] = prep
         NATIVE["last_prefetch"] = stream_id
         NATIVE["last_prefetch_at"] = now
+    detail = f" -> {voice_query}" if voice_query else (" (generic music)" if generic else "")
     print(
         f"[{time.strftime('%H:%M:%S')}] native: prefetch {stream_id}"
-        f"{' (late)' if late else ''}"
-        f"{' -> ' + voice_query if voice_query else ''}",
+        f"{' (late)' if late else ''}{detail}",
         flush=True,
     )
     threading.Thread(target=native_prepare, args=(prep,), daemon=True).start()
 
 
+def native_prepare_generic(prep: dict) -> None:
+    """Choose music for a generic "включи музыку" without Yandex Music."""
+    sid = prep["id"]
+    entries: list[dict] = []
+    with STATE.lock:
+        if STATE.queue_pos < len(STATE.queue):
+            entries = [dict(x) for x in STATE.queue[STATE.queue_pos:]]
+    if entries:
+        print("native: generic request -> continuing local queue", flush=True)
+    else:
+        seed = ""
+        with STATE.lock:
+            current = STATE.track or {}
+            if current.get("id"):
+                seed = str(current["id"])
+            elif STATE.history:
+                pos = STATE.history_pos
+                last = STATE.history[pos] if 0 <= pos < len(STATE.history) else STATE.history[-1]
+                seed = str(last.get("id") or "")
+        if seed:
+            print(f"native: generic request -> mix from {seed}", flush=True)
+            entries = yt_mix(seed, limit=25, timeout=8)
+        if not entries:
+            try:
+                settings = load_settings()
+                limit = int(settings.get("playlist_limit") or 30)
+                pl = fetch_playlist(
+                    "LL",
+                    limit=min(50, max(1, limit)),
+                    fallback_name="Мне понравилось",
+                    timeout=8,
+                )
+                entries = pl["entries"]
+                if entries:
+                    print("native: generic request -> liked playlist", flush=True)
+            except Exception as exc:
+                print(f"native: generic liked playlist failed: {exc}", flush=True)
+        if not entries:
+            print("native: generic request -> YouTube search 'музыка'", flush=True)
+            entries = yt_search("музыка", limit=10, timeout=8)
+    if not entries:
+        raise RuntimeError("no music source")
+
+    last_exc = "no downloadable result"
+    for cand in entries[:4]:
+        try:
+            path = download(cand["id"])
+        except Exception as exc:
+            last_exc = str(exc)[:200]
+            print(f"native: generic download {cand['id']} failed: {last_exc}", flush=True)
+            continue
+        track = dict(cand)
+        track["native_id"] = sid
+        track["native_query"] = "музыка"
+        prep["track"] = track
+        prep["others"] = [i for i in entries if i["id"] != cand["id"]]
+        prep["path"] = path
+        prep["keep_queue"] = True
+        print(
+            f"[{time.strftime('%H:%M:%S')}] native: ready generic {track.get('title')} [{sid}]",
+            flush=True,
+        )
+        return
+    raise RuntimeError(last_exc)
+
+
 def native_prepare(prep: dict) -> None:
     sid = prep["id"]
     try:
+        if prep.get("generic"):
+            native_prepare_generic(prep)
+            return
         query = str(prep.get("query") or "").strip()
         if not query:
             # maind.log sometimes writes the directive just before the
@@ -1930,7 +2136,13 @@ def native_prepare(prep: dict) -> None:
                     voice = NATIVE.get("voice") or {}
                     if voice and time.time() - float(voice.get("at") or 0.0) < 30.0:
                         query = str(voice.get("query") or "").strip()
+                        if voice.get("generic"):
+                            prep["generic"] = True
+                            break
             prep["query"] = query
+            if prep.get("generic"):
+                native_prepare_generic(prep)
+                return
         if not query:
             prep["error"] = "no recognised voice query"
             return
@@ -2171,9 +2383,9 @@ def native_activate(sid: str, prep: dict) -> None:
                 time.sleep(remain)
             native_thaw()
             frozen = False
-        # Late requests have no prefetch, so metadata+search+download all
-        # happen while the speaker is muted.
-        prep["event"].wait(25)
+        # Late requests have no prefetch, so search+download happen while the
+        # speaker is muted. Generic "включи музыку" may try a mix + playlist.
+        prep["event"].wait(35 if prep.get("generic") else 25)
         if prep.get("error") or not prep.get("path"):
             print(f"native: not playing {sid}: {prep.get('error') or 'no file'}", flush=True)
             if frozen:
@@ -2201,6 +2413,8 @@ def native_activate(sid: str, prep: dict) -> None:
             STATE.playlist = None
         time.sleep(0.2)
         _play_file(prep["path"], track)
+        if not prep.get("keep_queue"):
+            schedule_mix(track["id"])
         if muted:
             time.sleep(0.7)
             try:
