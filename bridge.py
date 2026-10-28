@@ -933,6 +933,26 @@ def youtube_logout() -> dict:
 AUDIO_EXTS = (".m4a", ".mp4", ".mp3", ".webm", ".opus", ".ogg")
 
 
+def audio_duration(path: Path) -> float:
+    """Read the real file duration when yt-dlp did not provide one."""
+    try:
+        proc = subprocess.run(
+            [
+                "ffprobe",
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=nw=1:nk=1",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        return max(0.0, float((proc.stdout or "").strip()))
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return 0.0
+
+
 def download(video_id: str) -> Path:
     """Fetch the original audio stream; no MP3 transcode (saves ~15 s).
 
@@ -991,6 +1011,12 @@ def download(video_id: str) -> Path:
 def _play_file(path: Path, track: dict, record: bool = True) -> None:
     url = f"http://{PC_IP}:{HTTP_PORT}/stream/{urllib.parse.quote(path.name)}"
     gen = STATE.generation
+    duration = float(track.get("duration") or 0)
+    if duration <= 0:
+        duration = audio_duration(path)
+        if duration > 0:
+            track = dict(track)
+            track["duration"] = duration
 
     if PLAYER_MODE == "gst":
         remote = (
@@ -1011,7 +1037,7 @@ def _play_file(path: Path, track: dict, record: bool = True) -> None:
             STATE.started_at = time.time()
             STATE.pause_started = None
             STATE.paused_total = 0.0
-            STATE.duration = float(track.get("duration") or 0)
+            STATE.duration = duration
             STATE.paused = False
             STATE.ducked = False
             if record:
