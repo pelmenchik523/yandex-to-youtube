@@ -19,6 +19,7 @@ import base64
 import hashlib
 import json
 import os
+import random
 import re
 import shlex
 import shutil
@@ -951,6 +952,20 @@ def audio_duration(path: Path) -> float:
         return max(0.0, float((proc.stdout or "").strip()))
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return 0.0
+
+
+def cached_audio_files(limit: int = 30) -> list[Path]:
+    """Recently downloaded tracks, used as an offline fallback for music."""
+    try:
+        files = [
+            p
+            for p in CACHE.iterdir()
+            if p.is_file() and p.suffix.lower() in AUDIO_EXTS and p.stat().st_size > 1024
+        ]
+    except OSError:
+        return []
+    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return files[: max(1, int(limit or 30))]
 
 
 def download(video_id: str) -> Path:
@@ -2079,6 +2094,44 @@ def native_on_prefetch(stream_id: str, late: bool = False) -> None:
     threading.Thread(target=native_prepare, args=(prep,), daemon=True).start()
 
 
+def native_prepare_cached(prep: dict) -> bool:
+    """Fallback to downloaded tracks when YouTube cannot provide music."""
+    cached = cached_audio_files()
+    if not cached:
+        return False
+    with STATE.lock:
+        current_id = str((STATE.track or {}).get("id") or "")
+        titles = {
+            str(h.get("id")): str(h.get("title") or "")
+            for h in STATE.history
+            if h.get("id")
+        }
+    pool = [p for p in cached if p.stem != current_id] or cached
+    chosen = random.choice(pool)
+    prep["track"] = {
+        "id": chosen.stem,
+        "title": titles.get(chosen.stem) or chosen.stem,
+        "duration": 0.0,
+    }
+    prep["others"] = [
+        {
+            "id": p.stem,
+            "title": titles.get(p.stem) or p.stem,
+            "duration": 0.0,
+        }
+        for p in cached
+        if p != chosen
+    ]
+    prep["path"] = chosen
+    prep["keep_queue"] = True
+    print(
+        f"[{time.strftime('%H:%M:%S')}] native: generic offline -> cached "
+        f"{prep['track']['title']} ({len(prep['others'])} more)",
+        flush=True,
+    )
+    return True
+
+
 def native_prepare_generic(prep: dict) -> None:
     """Choose music for a generic "включи музыку" without Yandex Music."""
     sid = prep["id"]
@@ -2120,6 +2173,8 @@ def native_prepare_generic(prep: dict) -> None:
             print("native: generic request -> YouTube search 'музыка'", flush=True)
             entries = yt_search("музыка", limit=10, timeout=8)
     if not entries:
+        if native_prepare_cached(prep):
+            return
         raise RuntimeError("no music source")
 
     last_exc = "no downloadable result"
@@ -2141,6 +2196,8 @@ def native_prepare_generic(prep: dict) -> None:
             f"[{time.strftime('%H:%M:%S')}] native: ready generic {track.get('title')} [{sid}]",
             flush=True,
         )
+        return
+    if native_prepare_cached(prep):
         return
     raise RuntimeError(last_exc)
 
