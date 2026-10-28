@@ -16,6 +16,10 @@ fi
 if [ -f bridge.pid ] && kill -0 "$(cat bridge.pid)" 2>/dev/null; then
     echo "bridge already running: $(cat bridge.pid)"
 else
+    # Clean up SSH watchers/sockets left by a previously crashed bridge.
+    pkill -f 'tail -n 0 -F /data/quasar/daemons_logs/maind.log' 2>/dev/null || true
+    pkill -f 'ytstation-ctl \[mux\]' 2>/dev/null || true
+    rm -f "$HOME/.ssh/ytstation-ctl"
     nohup python3 -u bridge.py >> bridge.log 2>&1 &
     echo $! > bridge.pid
     echo "bridge started: $(cat bridge.pid)"

@@ -19,6 +19,7 @@ PIN_HOSTS = {
     "www.youtube.com",
     "youtube.com",
     "m.youtube.com",
+    "music.youtube.com",
     "youtu.be",
 }
 FALLBACK_IPS = (
@@ -114,6 +115,19 @@ def handle(client: socket.socket) -> None:
             host = parts[1]
         if host in PIN_HOSTS:
             destinations = [pin_ip()]
+            if host == "music.youtube.com":
+                # Sometimes music.youtube.com is reachable directly even when
+                # www.youtube.com needs a pinned Google frontend.  Keep that
+                # direct address as a second chance.
+                try:
+                    info = socket.getaddrinfo(
+                        host, port, socket.AF_INET, socket.SOCK_STREAM
+                    )
+                    direct = info[0][4][0]
+                    if direct not in destinations:
+                        destinations.append(direct)
+                except OSError:
+                    pass
         else:
             info = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
             destinations = [info[0][4][0]]

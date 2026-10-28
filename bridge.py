@@ -37,7 +37,7 @@ CACHE.mkdir(parents=True, exist_ok=True)
 WEB_DIR = BASE / "web"
 
 YTDLP = os.environ.get("YTDLP") or shutil.which("yt-dlp") or str(Path.home() / ".local/bin/yt-dlp")
-STATION_HOST = os.environ.get("STATION_HOST", "192.168.1.206")
+STATION_HOST = os.environ.get("STATION_HOST", "192.168.1.205")
 STATION_PORT = int(os.environ.get("STATION_PORT", "2222"))
 STATION_USER = os.environ.get("STATION_USER", "root")
 STATION_GST = "/system/vendor/quasar/maind --gst-launch"
@@ -63,8 +63,18 @@ DEFAULT_SETTINGS = {
 }
 
 PLAYLIST_NAMES = {
-    "LL": "Мне понравилось",
+    "LL": "Лайки YouTube",
+    "LM": "Мне нравится (YouTube Music)",
+    "TRENDS": "Тренды YouTube Music",
     "WL": "Смотреть позже",
+}
+
+# LM is the private "liked music" playlist of YouTube Music (not the regular
+# YouTube LL playlist).  TRENDS is YouTube Music's global Top 100 chart; it is
+# not Yandex Music and does not use the Yandex Music API.
+MUSIC_PLAYLIST_URLS = {
+    "LM": "https://music.youtube.com/playlist?list=LM",
+    "TRENDS": "https://www.youtube.com/playlist?list=PL4fGSI1pDJn6puJdseH2Rt9sMvt9E2M4i",
 }
 
 YT_STATUS_CACHE: dict = {"at": 0.0, "data": None}
@@ -217,17 +227,29 @@ SSH_BASE = [
     "-o", "ControlMaster=auto",
     "-o", f"ControlPath={SSH_CTL}",
     "-o", "ControlPersist=600",
+    "-o", "ServerAliveInterval=10",
+    "-o", "ServerAliveCountMax=2",
     f"{STATION_USER}@{STATION_HOST}",
 ]
 
 
 def ssh(cmd: str, timeout: float = 20.0) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        SSH_BASE + [cmd],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    try:
+        return subprocess.run(
+            SSH_BASE + [cmd],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"станция {STATION_HOST}:{STATION_PORT} не отвечает по SSH "
+            f"(таймаут {timeout:g} с). Проверьте питание и сеть."
+        ) from exc
+    except OSError as exc:
+        raise RuntimeError(
+            f"не удалось подключиться к станции {STATION_HOST}:{STATION_PORT}: {exc}"
+        ) from exc
 
 
 # The Station runs Buildroot/busybox and has no pkill/pgrep.  Find the
@@ -492,17 +514,18 @@ def schedule_mix(video_id: str, limit: int = 25) -> None:
 
 
 def parse_playlist_ref(ref: str) -> dict:
-    """Accept a playlist URL, a raw playlist id, or the LL/WL shortcuts."""
+    """Accept a playlist URL, a raw playlist id, or a LL/LM/WL/TRENDS shortcut."""
     raw = (ref or "").strip()
     if not raw:
         raise ValueError("Укажи ссылку или ID плейлиста.")
-    if raw.lower() in ("ll", "wl"):
-        playlist_id = raw.upper()
+    shortcut = raw.upper()
+    if shortcut in ("LL", "LM", "WL", "TRENDS"):
+        playlist_id = shortcut
     else:
         m = _PLAYLIST_ID_RE.search(raw)
         if m:
             playlist_id = m.group(1)
-            if playlist_id.upper() in ("LL", "WL"):
+            if playlist_id.upper() in ("LL", "LM", "WL"):
                 playlist_id = playlist_id.upper()
             elif len(playlist_id) < 8:
                 raise ValueError(
@@ -513,10 +536,10 @@ def parse_playlist_ref(ref: str) -> dict:
             playlist_id = raw
         else:
             raise ValueError("Это не похоже на плейлист YouTube.")
-    return {
-        "id": playlist_id,
-        "url": f"https://www.youtube.com/playlist?list={playlist_id}",
-    }
+    url = MUSIC_PLAYLIST_URLS.get(playlist_id)
+    if not url:
+        url = f"https://www.youtube.com/playlist?list={playlist_id}"
+    return {"id": playlist_id, "url": url}
 
 
 def fetch_playlist(
@@ -662,11 +685,22 @@ def _probe_youtube_login(
         "--print", "%(id)s\t%(playlist_title)s",
         "https://www.youtube.com/playlist?list=LL",
     ]
+    lm_cmd = base + [
+        "--flat-playlist",
+        "--playlist-end", "1",
+        "--print", "%(id)s\t%(playlist_title)s",
+        "https://music.youtube.com/playlist?list=LM",
+    ]
     try:
         proc = subprocess.run(ll_cmd, capture_output=True, text=True, timeout=60)
         lines = [line for line in (proc.stdout or "").splitlines() if line.strip()]
         if proc.returncode == 0 and lines:
-            return True, "Вход работает: плейлист «Мне понравилось» доступен."
+            return True, "Вход работает: лайки YouTube доступны."
+
+        lm = subprocess.run(lm_cmd, capture_output=True, text=True, timeout=60)
+        lm_lines = [line for line in (lm.stdout or "").splitlines() if line.strip()]
+        if lm.returncode == 0 and lm_lines:
+            return True, "Вход работает: лайки YouTube Music доступны."
 
         feed_cmd = base + [
             "--flat-playlist",
@@ -679,12 +713,12 @@ def _probe_youtube_login(
         if feed.returncode == 0 and feed_lines:
             return True, "Вход работает: YouTube отдал список плейлистов."
 
-        err = ((proc.stderr or "") + "\n" + (feed.stderr or "")).strip()
+        err = ((proc.stderr or "") + "\n" + (lm.stderr or "") + "\n" + (feed.stderr or "")).strip()
         low = err.lower()
         if any(word in low for word in ("private", "sign in", "login", "cookies")):
             return (
                 False,
-                "YouTube не отдал приватный плейлист. "
+                "YouTube не отдал лайки/приватный плейлист. "
                 "Проверь, что ты вошёл в YouTube в браузере на этом компьютере.",
             )
         last = err.splitlines()[-1][:300] if err else "yt-dlp вернул пустой ответ"
@@ -696,7 +730,7 @@ def _probe_youtube_login(
 
 
 def youtube_status(force: bool = False, quick: bool = False) -> dict:
-    """Check whether yt-dlp can see the private LL playlist via cookies."""
+    """Check whether yt-dlp can see private YouTube/YouTube Music playlists."""
     now = time.time()
     cached = YT_STATUS_CACHE.get("data")
     if not force and cached and now - float(YT_STATUS_CACHE.get("at") or 0) < 30:
@@ -1841,6 +1875,43 @@ def native_generic_music_command(text: str) -> bool:
     return low in NATIVE_GENERIC_REQUESTS
 
 
+NATIVE_PLAYLIST_COMMANDS = {
+    "мне нравится": "LM",
+    "мне понравилось": "LM",
+    "нравится": "LM",
+    "мои лайки": "LM",
+    "лайки": "LM",
+    "любимые треки": "LM",
+    "любимые песни": "LM",
+    "мои любимые песни": "LM",
+    "мою волну": "LM",
+    "моя волна": "LM",
+    "тренды": "TRENDS",
+    "тренды для вас": "TRENDS",
+    "трендовые треки": "TRENDS",
+    "трендовые песни": "TRENDS",
+    "трендовые треки для вас": "TRENDS",
+    "что в тренде": "TRENDS",
+    "топ треки": "TRENDS",
+    "топ чарт": "TRENDS",
+    "чарт": "TRENDS",
+}
+
+
+def native_playlist_command(text: str) -> str:
+    """Return LM/TRENDS for a playlist request, or "" for a normal song."""
+    low = " ".join((text or "").casefold().replace("ё", "е").strip(" .!,").split())
+    low = re.sub(
+        r"^(?:а|ну|давай|мне|включи|поставь|вруби|запусти|сыграй|найди)\s+",
+        "",
+        low,
+    )
+    low = re.sub(r"^плейлист\s+", "", low)
+    low = re.sub(r"^(?:мне|пожалуйста)\s+", "", low)
+    low = re.sub(r"\s+пожалуйста$", "", low)
+    return NATIVE_PLAYLIST_COMMANDS.get(low, "")
+
+
 def native_local_next(source: str = "voice") -> None:
     """Switch to the next YouTube queue item without asking Yandex Music."""
     now = time.time()
@@ -1921,6 +1992,35 @@ def native_on_voice_text(text: str) -> None:
                 NATIVE["continuing"][sid] = time.time() + 10.0
         resume()
         return
+    playlist_source = native_playlist_command(text)
+    if playlist_source:
+        now = time.time()
+        with NATIVE_LOCK:
+            NATIVE["local_switch_until"] = 0.0
+            NATIVE["next_handled_at"] = 0.0
+            NATIVE["suppress_until"] = 0.0
+            timer = NATIVE.get("voice_timer")
+            if timer is not None:
+                try:
+                    timer.cancel()
+                except Exception:
+                    pass
+            NATIVE["voice_timer"] = None
+            NATIVE["voice"] = {
+                "text": text,
+                "query": "",
+                "generic": False,
+                "playlist": playlist_source,
+                "at": now,
+                "done": False,
+                "token": f"{now:.3f}",
+            }
+        print(
+            f"native: heard playlist request '{text}' -> {playlist_source}",
+            flush=True,
+        )
+        return
+
     if native_generic_music_command(text):
         now = time.time()
         with NATIVE_LOCK:
@@ -2067,13 +2167,16 @@ def native_on_prefetch(stream_id: str, late: bool = False) -> None:
         voice = NATIVE.get("voice") or {}
         voice_query = ""
         generic = False
+        playlist = ""
         if voice and now - float(voice.get("at") or 0.0) < 30.0:
             voice_query = str(voice.get("query") or "").strip()
             generic = bool(voice.get("generic"))
+            playlist = str(voice.get("playlist") or "")
         prep = {
             "id": stream_id,
             "query": voice_query,
             "generic": generic,
+            "playlist": playlist,
             "track": None,
             "path": None,
             "error": "",
@@ -2085,13 +2188,46 @@ def native_on_prefetch(stream_id: str, late: bool = False) -> None:
         NATIVE["prep"][stream_id] = prep
         NATIVE["last_prefetch"] = stream_id
         NATIVE["last_prefetch_at"] = now
-    detail = f" -> {voice_query}" if voice_query else (" (generic music)" if generic else "")
+    if voice_query:
+        detail = f" -> {voice_query}"
+    elif playlist:
+        detail = f" -> playlist {playlist}"
+    else:
+        detail = " (generic music)" if generic else ""
     print(
         f"[{time.strftime('%H:%M:%S')}] native: prefetch {stream_id}"
         f"{' (late)' if late else ''}{detail}",
         flush=True,
     )
     threading.Thread(target=native_prepare, args=(prep,), daemon=True).start()
+
+
+def native_prepare_entries(prep: dict, entries: list[dict], label: str) -> bool:
+    """Download the first working entry and keep the rest as the local queue."""
+    sid = prep["id"]
+    last_exc = "no downloadable result"
+    for cand in entries[:4]:
+        try:
+            path = download(cand["id"])
+        except Exception as exc:
+            last_exc = str(exc)[:200]
+            print(f"native: {label} download {cand['id']} failed: {last_exc}", flush=True)
+            continue
+        track = dict(cand)
+        track["native_id"] = sid
+        track["native_query"] = label
+        prep["track"] = track
+        prep["others"] = [i for i in entries if i["id"] != cand["id"]]
+        prep["path"] = path
+        prep["keep_queue"] = True
+        print(
+            f"[{time.strftime('%H:%M:%S')}] native: ready {label} "
+            f"{track.get('title')} [{sid}]",
+            flush=True,
+        )
+        return True
+    print(f"native: {label} unavailable: {last_exc}", flush=True)
+    return False
 
 
 def native_prepare_cached(prep: dict) -> bool:
@@ -2132,9 +2268,52 @@ def native_prepare_cached(prep: dict) -> bool:
     return True
 
 
+def native_prepare_playlist(prep: dict, source: str) -> None:
+    """Prepare a YouTube Music playlist/LM/TRENDS request from voice."""
+    settings = load_settings()
+    try:
+        limit = int(settings.get("playlist_limit") or 30)
+    except (TypeError, ValueError):
+        limit = 30
+    entries: list[dict] = []
+    try:
+        pl = fetch_playlist(
+            source,
+            limit=min(50, max(1, limit)),
+            fallback_name=PLAYLIST_NAMES.get(source, source),
+            timeout=15,
+        )
+        entries = pl["entries"]
+        print(
+            f"native: playlist {source} -> {pl.get('name')} ({len(entries)} tracks)",
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"native: playlist {source} failed: {exc}", flush=True)
+
+    if not entries and source == "LM":
+        try:
+            pl = fetch_playlist(
+                "LL",
+                limit=min(50, max(1, limit)),
+                fallback_name=PLAYLIST_NAMES["LL"],
+                timeout=15,
+            )
+            entries = pl["entries"]
+            if entries:
+                print("native: LM unavailable -> using YouTube likes (LL)", flush=True)
+        except Exception as exc:
+            print(f"native: playlist LL fallback failed: {exc}", flush=True)
+
+    if entries and native_prepare_entries(prep, entries, PLAYLIST_NAMES.get(source, source)):
+        return
+    if native_prepare_cached(prep):
+        return
+    raise RuntimeError(f"плейлист {source} недоступен")
+
+
 def native_prepare_generic(prep: dict) -> None:
     """Choose music for a generic "включи музыку" without Yandex Music."""
-    sid = prep["id"]
     entries: list[dict] = []
     with STATE.lock:
         if STATE.queue_pos < len(STATE.queue):
@@ -2142,18 +2321,40 @@ def native_prepare_generic(prep: dict) -> None:
     if entries:
         print("native: generic request -> continuing local queue", flush=True)
     else:
-        seed = ""
-        with STATE.lock:
-            current = STATE.track or {}
-            if current.get("id"):
-                seed = str(current["id"])
-            elif STATE.history:
-                pos = STATE.history_pos
-                last = STATE.history[pos] if 0 <= pos < len(STATE.history) else STATE.history[-1]
-                seed = str(last.get("id") or "")
-        if seed:
-            print(f"native: generic request -> mix from {seed}", flush=True)
-            entries = yt_mix(seed, limit=25, timeout=8)
+        # Prefer the actual YouTube Music "liked songs" playlist.
+        try:
+            settings = load_settings()
+            limit = int(settings.get("playlist_limit") or 30)
+            pl = fetch_playlist(
+                "LM",
+                limit=min(50, max(1, limit)),
+                fallback_name=PLAYLIST_NAMES["LM"],
+                timeout=8,
+            )
+            entries = pl["entries"]
+            if entries:
+                print("native: generic request -> YouTube Music likes", flush=True)
+        except Exception as exc:
+            print(f"native: generic YouTube Music likes failed: {exc}", flush=True)
+
+        if not entries:
+            seed = ""
+            with STATE.lock:
+                current = STATE.track or {}
+                if current.get("id"):
+                    seed = str(current["id"])
+                elif STATE.history:
+                    pos = STATE.history_pos
+                    last = (
+                        STATE.history[pos]
+                        if 0 <= pos < len(STATE.history)
+                        else STATE.history[-1]
+                    )
+                    seed = str(last.get("id") or "")
+            if seed:
+                print(f"native: generic request -> mix from {seed}", flush=True)
+                entries = yt_mix(seed, limit=25, timeout=8)
+
         if not entries:
             try:
                 settings = load_settings()
@@ -2161,50 +2362,37 @@ def native_prepare_generic(prep: dict) -> None:
                 pl = fetch_playlist(
                     "LL",
                     limit=min(50, max(1, limit)),
-                    fallback_name="Мне понравилось",
+                    fallback_name=PLAYLIST_NAMES["LL"],
                     timeout=8,
                 )
                 entries = pl["entries"]
                 if entries:
-                    print("native: generic request -> liked playlist", flush=True)
+                    print("native: generic request -> YouTube likes", flush=True)
             except Exception as exc:
-                print(f"native: generic liked playlist failed: {exc}", flush=True)
+                print(f"native: generic YouTube likes failed: {exc}", flush=True)
+
         if not entries:
             print("native: generic request -> YouTube search 'музыка'", flush=True)
             entries = yt_search("музыка", limit=10, timeout=8)
+
     if not entries:
         if native_prepare_cached(prep):
             return
         raise RuntimeError("no music source")
 
-    last_exc = "no downloadable result"
-    for cand in entries[:4]:
-        try:
-            path = download(cand["id"])
-        except Exception as exc:
-            last_exc = str(exc)[:200]
-            print(f"native: generic download {cand['id']} failed: {last_exc}", flush=True)
-            continue
-        track = dict(cand)
-        track["native_id"] = sid
-        track["native_query"] = "музыка"
-        prep["track"] = track
-        prep["others"] = [i for i in entries if i["id"] != cand["id"]]
-        prep["path"] = path
-        prep["keep_queue"] = True
-        print(
-            f"[{time.strftime('%H:%M:%S')}] native: ready generic {track.get('title')} [{sid}]",
-            flush=True,
-        )
+    if native_prepare_entries(prep, entries, "музыка"):
         return
     if native_prepare_cached(prep):
         return
-    raise RuntimeError(last_exc)
+    raise RuntimeError("no downloadable music source")
 
 
 def native_prepare(prep: dict) -> None:
     sid = prep["id"]
     try:
+        if prep.get("playlist"):
+            native_prepare_playlist(prep, str(prep["playlist"]))
+            return
         if prep.get("generic"):
             native_prepare_generic(prep)
             return
@@ -2218,11 +2406,17 @@ def native_prepare(prep: dict) -> None:
                 with NATIVE_LOCK:
                     voice = NATIVE.get("voice") or {}
                     if voice and time.time() - float(voice.get("at") or 0.0) < 30.0:
+                        if voice.get("playlist"):
+                            prep["playlist"] = str(voice.get("playlist") or "")
+                            break
                         query = str(voice.get("query") or "").strip()
                         if voice.get("generic"):
                             prep["generic"] = True
                             break
             prep["query"] = query
+            if prep.get("playlist"):
+                native_prepare_playlist(prep, str(prep["playlist"]))
+                return
             if prep.get("generic"):
                 native_prepare_generic(prep)
                 return
@@ -2468,7 +2662,8 @@ def native_activate(sid: str, prep: dict) -> None:
             frozen = False
         # Late requests have no prefetch, so search+download happen while the
         # speaker is muted. Generic "включи музыку" may try a mix + playlist.
-        prep["event"].wait(35 if prep.get("generic") else 25)
+        wait_s = 40 if (prep.get("generic") or prep.get("playlist")) else 25
+        prep["event"].wait(wait_s)
         if prep.get("error") or not prep.get("path"):
             print(f"native: not playing {sid}: {prep.get('error') or 'no file'}", flush=True)
             if frozen:

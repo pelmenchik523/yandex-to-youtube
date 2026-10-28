@@ -422,7 +422,9 @@
           </div>
         </div>
         <div class="actions">
-          <button class="btn" id="plLL">Мне понравилось (LL)</button>
+          <button class="btn" id="plLM">Мне нравится (YouTube Music)</button>
+          <button class="btn" id="plTrends">Тренды YouTube Music</button>
+          <button class="btn" id="plLL">Лайки YouTube (LL)</button>
           <button class="btn" id="plWL">Смотреть позже (WL)</button>
         </div>
 
@@ -668,7 +670,7 @@ function applyYouTubeStatus(d){
     $("ytHint").textContent = "Аккаунт подключён. «Войти» обновит сессию, «Выйти» отключит её в мосте — аккаунт в браузере останется.";
   }else if(logged === false){
     $("ytAccTitle").textContent = "Аккаунт не подключён";
-    $("ytAccSub").textContent = "Войди, чтобы открыть «Мне понравилось» и приватные плейлисты";
+    $("ytAccSub").textContent = "Войди, чтобы открыть лайки YouTube Music и приватные плейлисты";
     if(!state.loginWaiting){
       $("ytHint").textContent = "Вход откроется в Firefox на этом компьютере. Пароль вводится только на сайте Google.";
     }
@@ -764,7 +766,7 @@ $("searchForm").addEventListener("submit", async (e)=>{
   e.preventDefault();
   const q = $("q").value.trim();
   if(!q) return;
-  const isPlaylist = /(?:[?&]list=|^(?:LL|WL)$|^PL[A-Za-z0-9_-]{10,}$)/i.test(q);
+  const isPlaylist = /(?:[?&]list=|^(?:LL|LM|WL|TRENDS)$|^PL[A-Za-z0-9_-]{10,}$)/i.test(q);
   if(isPlaylist){
     $("searchBtn").disabled = true;
     await playPlaylist(q, "");
@@ -864,7 +866,7 @@ $("ytImport").onclick = async ()=>{
 };
 
 $("ytLogout").onclick = async ()=>{
-  if(!confirm("Отключить аккаунт YouTube в мосте? Приватные плейлисты и «Мне понравилось» перестанут работать, пока не войдёшь снова.")) return;
+  if(!confirm("Отключить аккаунт YouTube в мосте? Приватные плейлисты, лайки YouTube и YouTube Music перестанут работать, пока не войдёшь снова.")) return;
   const btn = $("ytLogout");
   btn.disabled = true;
   try{
@@ -910,7 +912,9 @@ $("plSave").onclick = async ()=>{
   try{ await savePlaylist($("plUrl").value.trim(), $("plName").value.trim()); }
   finally{ btn.disabled = false; }
 };
-$("plLL").onclick = ()=> playPlaylist("LL", "Мне понравилось");
+$("plLM").onclick = ()=> playPlaylist("LM", "Мне нравится (YouTube Music)");
+$("plTrends").onclick = ()=> playPlaylist("TRENDS", "Тренды YouTube Music");
+$("plLL").onclick = ()=> playPlaylist("LL", "Лайки YouTube");
 $("plWL").onclick = ()=> playPlaylist("WL", "Смотреть позже");
 
 loadYouTube({quick:true});

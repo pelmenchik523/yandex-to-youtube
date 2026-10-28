@@ -12,3 +12,10 @@ for f in bridge.pid pinproxy.pid; do
         echo "stopped $f (pid $pid)"
     fi
 done
+
+# The bridge starts `ssh ... tail -F maind.log`; when the bridge is killed the
+# SSH child can survive and pile up across restarts.  Drop those watchers and
+# the shared control socket so a stale tunnel cannot make the next command hang.
+pkill -f 'tail -n 0 -F /data/quasar/daemons_logs/maind.log' 2>/dev/null || true
+pkill -f 'ytstation-ctl \[mux\]' 2>/dev/null || true
+rm -f "$HOME/.ssh/ytstation-ctl"
