@@ -2043,7 +2043,7 @@ def native_on_voice_text(text: str) -> None:
                 "token": f"{now:.3f}",
             }
         print(
-            f"native: heard generic music request '{text}', using local queue/mix",
+            f"native: heard generic music request '{text}', using trends/mix",
             flush=True,
         )
         return
@@ -2313,74 +2313,91 @@ def native_prepare_playlist(prep: dict, source: str) -> None:
 
 
 def native_prepare_generic(prep: dict) -> None:
-    """Choose music for a generic "включи музыку" without Yandex Music."""
+    """Start a mix from a random track of the YouTube Music trends chart."""
     entries: list[dict] = []
+    current_id = ""
     with STATE.lock:
-        if STATE.queue_pos < len(STATE.queue):
-            entries = [dict(x) for x in STATE.queue[STATE.queue_pos:]]
-    if entries:
-        print("native: generic request -> continuing local queue", flush=True)
-    else:
-        # Prefer the actual YouTube Music "liked songs" playlist.
+        current = STATE.track or {}
+        current_id = str(current.get("id") or "")
+
+    # 1. Take a random song from the YouTube Music trends/recommendations
+    #    source and build a personal radio mix around it.
+    trends: list[dict] = []
+    try:
+        settings = load_settings()
         try:
-            settings = load_settings()
-            limit = int(settings.get("playlist_limit") or 30)
-            pl = fetch_playlist(
-                "LM",
-                limit=min(50, max(1, limit)),
-                fallback_name=PLAYLIST_NAMES["LM"],
-                timeout=8,
+            limit = int(settings.get("playlist_limit") or 50)
+        except (TypeError, ValueError):
+            limit = 50
+        pl = fetch_playlist(
+            "TRENDS",
+            limit=min(100, max(1, limit)),
+            fallback_name=PLAYLIST_NAMES["TRENDS"],
+            timeout=10,
+        )
+        trends = pl["entries"]
+        if trends:
+            print(
+                f"native: generic request -> trends {pl.get('name')} "
+                f"({len(trends)} tracks)",
+                flush=True,
             )
-            entries = pl["entries"]
-            if entries:
-                print("native: generic request -> YouTube Music likes", flush=True)
-        except Exception as exc:
-            print(f"native: generic YouTube Music likes failed: {exc}", flush=True)
+    except Exception as exc:
+        print(f"native: generic trends failed: {exc}", flush=True)
 
-        if not entries:
-            seed = ""
-            with STATE.lock:
-                current = STATE.track or {}
-                if current.get("id"):
-                    seed = str(current["id"])
-                elif STATE.history:
-                    pos = STATE.history_pos
-                    last = (
-                        STATE.history[pos]
-                        if 0 <= pos < len(STATE.history)
-                        else STATE.history[-1]
-                    )
-                    seed = str(last.get("id") or "")
-            if seed:
-                print(f"native: generic request -> mix from {seed}", flush=True)
-                entries = yt_mix(seed, limit=25, timeout=8)
+    if trends:
+        pool = [t for t in trends if str(t.get("id") or "") != current_id] or trends
+        seed = random.choice(pool)
+        seed_id = str(seed.get("id") or "")
+        print(
+            f"native: generic request -> random seed {seed.get('title')} [{seed_id}]",
+            flush=True,
+        )
+        mix = yt_mix(seed_id, limit=25, timeout=15) if seed_id else []
+        if mix:
+            entries = [seed] + [x for x in mix if x.get("id") != seed_id]
+            print(
+                f"native: generic request -> mix {len(mix)} tracks after seed",
+                flush=True,
+            )
+        else:
+            # The mix endpoint can be unavailable; the chart itself is still
+            # a good local queue and keeps "включи музыку" from going silent.
+            entries = [seed] + [
+                t for t in trends if str(t.get("id") or "") != seed_id
+            ]
+            print("native: generic request -> trend queue (no mix)", flush=True)
 
-        if not entries:
-            try:
-                settings = load_settings()
-                limit = int(settings.get("playlist_limit") or 30)
-                pl = fetch_playlist(
-                    "LL",
-                    limit=min(50, max(1, limit)),
-                    fallback_name=PLAYLIST_NAMES["LL"],
-                    timeout=8,
+    # 2. If the trends source is unavailable, continue from the last track.
+    if not entries:
+        seed_id = ""
+        with STATE.lock:
+            current = STATE.track or {}
+            if current.get("id"):
+                seed_id = str(current["id"])
+            elif STATE.history:
+                pos = STATE.history_pos
+                last = (
+                    STATE.history[pos]
+                    if 0 <= pos < len(STATE.history)
+                    else STATE.history[-1]
                 )
-                entries = pl["entries"]
-                if entries:
-                    print("native: generic request -> YouTube likes", flush=True)
-            except Exception as exc:
-                print(f"native: generic YouTube likes failed: {exc}", flush=True)
+                seed_id = str(last.get("id") or "")
+        if seed_id:
+            print(f"native: generic request -> mix from last {seed_id}", flush=True)
+            entries = yt_mix(seed_id, limit=25, timeout=8)
 
-        if not entries:
-            print("native: generic request -> YouTube search 'музыка'", flush=True)
-            entries = yt_search("музыка", limit=10, timeout=8)
+    # 3. Last online fallback: a plain music search.
+    if not entries:
+        print("native: generic request -> YouTube search 'музыка'", flush=True)
+        entries = yt_search("музыка", limit=10, timeout=8)
 
     if not entries:
         if native_prepare_cached(prep):
             return
         raise RuntimeError("no music source")
 
-    if native_prepare_entries(prep, entries, "музыка"):
+    if native_prepare_entries(prep, entries, "микс"):
         return
     if native_prepare_cached(prep):
         return
