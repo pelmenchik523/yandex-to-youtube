@@ -236,9 +236,9 @@ chmod +x install.sh start.sh stop.sh setup-station-dns.sh
 Скрипт:
 
 - проверит Python, yt-dlp, Node.js и Firefox;
-- спросит IP Станции и проверит SSH;
+- спросит IP Станции, проверит SSH и запишет адрес в `station.env` и в `bridge.py`;
 - включит DNS-блокировку нативных аудиопотоков Яндекс Музыки на Станции;
-- создаст `cache/`, `settings.json`, `playlists.json` и `station.env`;
+- создаст `cache/`, `settings.json` и `playlists.json`;
 - предложит добавить автозапуск в `crontab`.
 
 Если нужно включить или повторить DNS-блокировку отдельно:

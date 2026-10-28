@@ -99,6 +99,32 @@ export STATION_HOST="$STATION_HOST"
 printf 'STATION_HOST=%s\n' "$STATION_HOST" > station.env
 print_success "IP-адрес станции сохранен в station.env: $STATION_HOST"
 
+# Также записываем IP в значение по умолчанию в bridge.py, чтобы мост
+# работал с этим адресом даже без station.env.
+if python3 - "$STATION_HOST" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+ip = sys.argv[1].strip()
+path = Path("bridge.py")
+text = path.read_text(encoding="utf-8")
+pattern = re.compile(
+    r'^(STATION_HOST = os\.environ\.get\("STATION_HOST", ")[^"]*("\))$',
+    re.MULTILINE,
+)
+new_text, count = pattern.subn(lambda m: m.group(1) + ip + m.group(2), text)
+if count != 1:
+    raise SystemExit("не найдена строка STATION_HOST в bridge.py")
+path.write_text(new_text, encoding="utf-8")
+PY
+then
+    print_success "IP-адрес станции записан в bridge.py: $STATION_HOST"
+else
+    print_error "Не удалось записать IP-адрес станции в bridge.py"
+    exit 1
+fi
+
 STATION_PORT="2222"
 STATION_USER="root"
 
