@@ -965,15 +965,14 @@ def _auto_next(gen: int) -> None:
         else:
             native_continue = False
     if native_continue:
-        # A native request: ask Alice for the next track of the same context,
-        # then the log watcher will resolve and play it from YouTube.  Off by
-        # default: the next track needs 4-20 s to prepare.
+        # A voice-requested track: continue with the local YouTube queue
+        # instead of asking Yandex Music for another track.  Off by default.
         try:
             enabled = as_bool(load_settings().get("native_auto_next"), False)
         except Exception:
             enabled = False
         if enabled:
-            native_text_query("следующий трек")
+            play_next()
         return
     play_next()
 
@@ -1260,7 +1259,6 @@ def _start_track(track: dict, record: bool = True) -> dict:
 
 def play_next() -> dict:
     cancel_playlist_load()
-    native_next = False
     with STATE.lock:
         # If the user went back with "prev", go forward through history first.
         if STATE.history_pos < len(STATE.history) - 1:
@@ -1268,21 +1266,9 @@ def play_next() -> dict:
             track = STATE.history[STATE.history_pos]
             return _start_track(track, record=False)
         if STATE.queue_pos >= len(STATE.queue):
-            # A voice-requested track has no YouTube queue.  Ask the Station's
-            # Alice for the next track of the same context; Plan B will
-            # intercept the reply and play it from YouTube.
-            if STATE.track and STATE.track.get("native_id"):
-                native_next = True
-            else:
-                return {"ok": False, "error": "queue is empty"}
-        else:
-            track = STATE.queue[STATE.queue_pos]
-            STATE.queue_pos += 1
-    if native_next:
-        ok = native_text_query("следующий трек")
-        if ok:
-            return {"ok": True, "native": True}
-        return {"ok": False, "error": "не удалось попросить Алису включить следующий трек"}
+            return {"ok": False, "error": "queue is empty"}
+        track = STATE.queue[STATE.queue_pos]
+        STATE.queue_pos += 1
     return _start_track(track, record=True)
 
 
@@ -1635,7 +1621,6 @@ def serve_audio(handler: BaseHTTPRequestHandler, path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 NATIVE_LOG = "/data/quasar/daemons_logs/maind.log"
-NATIVE_SOCKS_PORT = 1080
 NATIVE_RE_STREAM = re.compile(r"AUDIO_PLAY streamId=(\d+)")
 NATIVE_RE_DIRECTIVE = re.compile(
     r"routeDirective \([^)]+\)([a-z_]+)(?:\.[A-Za-z_]+)?\s+via"
@@ -1643,18 +1628,16 @@ NATIVE_RE_DIRECTIVE = re.compile(
 NATIVE_RE_PHRASE = re.compile(r"recognizedPhrase='([^']*)'")
 
 NATIVE: dict = {
-    "token": "",
-    "token_at": 0.0,
     "prep": {},          # stream id -> preparation dict
     "last_prefetch": "",
     "last_prefetch_at": 0.0,
     "handled": {},       # stream id -> time.time() when playback started
-    "socks_at": 0.0,
     "activating": "",
     "self_pause_until": 0.0,
     "continue_until": 0.0,
     "continuing": {},    # stream id -> time until the native restart is ignored
     "local_switch_until": 0.0,  # next/prev handled locally; ignore native start
+    "next_handled_at": 0.0,     # debounce voice + player_next for the same skip
     "suppress_until": 0.0,      # debounce for native_suppress
     "voice": None,       # last recognised voice request
     "voice_timer": None,
@@ -1683,121 +1666,6 @@ def native_setting() -> bool:
     return value
 
 
-def native_socks() -> bool:
-    """Make sure the SSH SOCKS proxy through the Station (RU exit) is up."""
-    try:
-        socket.create_connection(("127.0.0.1", NATIVE_SOCKS_PORT), timeout=0.4).close()
-        return True
-    except OSError:
-        pass
-    with NATIVE_LOCK:
-        if time.time() - NATIVE["socks_at"] < 4:
-            return False
-        NATIVE["socks_at"] = time.time()
-    cmd = [
-        "ssh", "-T", "-f", "-N",
-        "-p", str(STATION_PORT),
-        "-o", "BatchMode=yes",
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "UserKnownHostsFile=/dev/null",
-        "-o", "ConnectTimeout=8",
-        "-o", "ServerAliveInterval=30",
-        "-o", "ExitOnForwardFailure=yes",
-        "-D", f"127.0.0.1:{NATIVE_SOCKS_PORT}",
-        f"{STATION_USER}@{STATION_HOST}",
-    ]
-    try:
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=12)
-    except Exception:
-        return False
-    for _ in range(20):
-        try:
-            socket.create_connection(("127.0.0.1", NATIVE_SOCKS_PORT), timeout=0.3).close()
-            return True
-        except OSError:
-            time.sleep(0.1)
-    return False
-
-
-def native_token(force: bool = False) -> str:
-    now = time.time()
-    with NATIVE_LOCK:
-        if not force and NATIVE["token"] and now - NATIVE["token_at"] < 1800:
-            return NATIVE["token"]
-    try:
-        proc = ssh("strings -a /data/quasar/account_storage.dat | head -3", timeout=10)
-    except Exception:
-        return ""
-    for line in (proc.stdout or "").splitlines():
-        idx = line.find("y0__")
-        if idx >= 0:
-            tok = line[idx:].strip()
-            with NATIVE_LOCK:
-                NATIVE["token"] = tok
-                NATIVE["token_at"] = now
-            return tok
-    return ""
-
-
-def native_track_info(stream_id: str) -> dict:
-    if not stream_id.isdigit():
-        return {}
-    if not native_socks():
-        print("native: SOCKS tunnel is not available", flush=True)
-        return {}
-    tok = native_token()
-    if not tok:
-        print("native: no Yandex Music token on the Station", flush=True)
-        return {}
-    url = f"https://api.music.yandex.net/tracks/{stream_id}"
-    data: dict = {}
-    for _ in range(2):
-        try:
-            out = subprocess.check_output(
-                [
-                    "curl", "-s", "-m", "12",
-                    "--socks5-hostname", f"127.0.0.1:{NATIVE_SOCKS_PORT}",
-                    "-H", f"Authorization: OAuth {tok}",
-                    url,
-                ],
-                text=True, timeout=16, stderr=subprocess.DEVNULL,
-            )
-            data = json.loads(out or "{}")
-        except Exception:
-            data = {}
-        if isinstance(data, dict) and data.get("result"):
-            break
-        tok = native_token(force=True)
-        if not tok:
-            break
-    try:
-        track = (data.get("result") or [None])[0]
-    except Exception:
-        track = None
-    if not isinstance(track, dict):
-        return {}
-    artists = ", ".join(str(a.get("name") or "") for a in (track.get("artists") or []))
-    return {
-        "title": str(track.get("title") or ""),
-        "artists": artists.strip(", "),
-        "duration": float(track.get("durationMs") or 0) / 1000.0,
-    }
-
-
-def native_pick(items: list[dict], info: dict) -> dict:
-    title = (info.get("title") or "").casefold()
-    want = float(info.get("duration") or 0.0)
-
-    def score(item: dict) -> tuple:
-        name = (item.get("title") or "").casefold()
-        same = 0 if title and title in name else 1
-        dur = float(item.get("duration") or 0.0)
-        diff = abs(dur - want) / want if want and dur else 1.0
-        return (same, round(diff, 2))
-
-    return sorted(items, key=score)[0]
-
-
 NATIVE_MUSIC_VERBS = (
     "включи", "включить", "поставь", "поставить", "сыграй", "сыграть",
     "запусти", "запустить", "вруби", "врубить", "найди", "найти",
@@ -1808,6 +1676,40 @@ NATIVE_QUERY_SKIP = {
     "следующий", "следующую", "следующий трек", "следующую песню",
     "предыдущий", "предыдущую", "предыдущий трек", "предыдущую песню",
 }
+
+
+NATIVE_NEXT_COMMANDS = {
+    "дальше", "далее", "следующий", "следующая", "следующую",
+    "следующий трек", "следующую песню", "следующая песня",
+    "переключи", "переключи трек", "пропусти", "пропусти трек", "скип",
+    "next", "next track", "skip",
+}
+
+
+def native_next_command(text: str) -> bool:
+    """True for Alice's "next track" commands (not for song titles)."""
+    low = " ".join((text or "").casefold().replace("ё", "е").strip(" .!,").split())
+    low = re.sub(r"^(?:а|ну|давай|включи|поставь|переключи(?: на)?)\s+", "", low)
+    low = re.sub(r"\s+пожалуйста$", "", low)
+    return low in NATIVE_NEXT_COMMANDS
+
+
+def native_local_next(source: str = "voice") -> None:
+    """Switch to the next YouTube queue item without asking Yandex Music."""
+    now = time.time()
+    with NATIVE_LOCK:
+        # Suppress the cloud's prefetch/player_start that follows the same
+        # "next" command. A real new song request clears this marker earlier.
+        NATIVE["local_switch_until"] = now + 12.0
+        NATIVE["suppress_until"] = 0.0
+        if now - float(NATIVE.get("next_handled_at") or 0.0) < 3.0:
+            return
+        NATIVE["next_handled_at"] = now
+    res = play_next()
+    if res.get("ok"):
+        print(f"native: {source} next -> local queue", flush=True)
+    else:
+        print(f"native: {source} next: {res.get('error') or 'queue is empty'}", flush=True)
 
 
 def native_music_query(text: str) -> str:
@@ -1855,6 +1757,9 @@ def native_on_voice_text(text: str) -> None:
         return
     duck(4.0)
     low = (text or "").casefold().strip(" .!,")
+    if native_next_command(text):
+        native_local_next("voice")
+        return
     if low in ("пауза", "стоп", "остановись", "останови", "хватит"):
         pause()
         return
@@ -1876,6 +1781,7 @@ def native_on_voice_text(text: str) -> None:
     with NATIVE_LOCK:
         # A concrete song request always wins over a previous next/prev mark.
         NATIVE["local_switch_until"] = 0.0
+        NATIVE["next_handled_at"] = 0.0
         NATIVE["suppress_until"] = 0.0
         prev = NATIVE.get("voice") or {}
         if (
@@ -1943,7 +1849,7 @@ def native_voice_fallback(token: str) -> None:
         }
         STATE.kill_current()
         with STATE.lock:
-            STATE.queue = []
+            STATE.queue = [c for c in items if c.get("id") != item.get("id")]
             STATE.queue_pos = 0
             STATE.playlist = None
         time.sleep(0.2)
@@ -1959,12 +1865,21 @@ def native_voice_fallback(token: str) -> None:
 def native_on_prefetch(stream_id: str, late: bool = False) -> None:
     if not native_setting():
         return
-    print(f"[{time.strftime('%H:%M:%S')}] native: prefetch {stream_id}{' (late)' if late else ''}", flush=True)
     now = time.time()
     with NATIVE_LOCK:
+        if now < float(NATIVE.get("local_switch_until") or 0.0):
+            # This prefetch is the cloud's own copy of "next"/"prev": we have
+            # already switched locally, so do not resolve it through Yandex
+            # Music or download another track.
+            NATIVE["last_prefetch"] = stream_id
+            NATIVE["last_prefetch_at"] = now
+            print(
+                f"[{time.strftime('%H:%M:%S')}] native: ignore prefetch {stream_id} "
+                "(local next)",
+                flush=True,
+            )
+            return
         if stream_id != NATIVE.get("last_prefetch"):
-            # A genuinely new request overrides a local next/prev suppression.
-            NATIVE["local_switch_until"] = 0.0
             NATIVE["suppress_until"] = 0.0
         handled_at = NATIVE["handled"].get(stream_id) or 0.0
         if now - handled_at < 1.0:
@@ -1972,9 +1887,15 @@ def native_on_prefetch(stream_id: str, late: bool = False) -> None:
         prev = NATIVE["prep"].get(stream_id)
         if prev and now - float(prev.get("at") or 0.0) < 120:
             return
+        # Plan B no longer calls the Yandex Music API.  The query comes from
+        # the phrase Alice just recognised; the stream id is only a marker.
+        voice = NATIVE.get("voice") or {}
+        voice_query = ""
+        if voice and now - float(voice.get("at") or 0.0) < 30.0:
+            voice_query = str(voice.get("query") or "").strip()
         prep = {
             "id": stream_id,
-            "query": "",
+            "query": voice_query,
             "track": None,
             "path": None,
             "error": "",
@@ -1986,25 +1907,38 @@ def native_on_prefetch(stream_id: str, late: bool = False) -> None:
         NATIVE["prep"][stream_id] = prep
         NATIVE["last_prefetch"] = stream_id
         NATIVE["last_prefetch_at"] = now
+    print(
+        f"[{time.strftime('%H:%M:%S')}] native: prefetch {stream_id}"
+        f"{' (late)' if late else ''}"
+        f"{' -> ' + voice_query if voice_query else ''}",
+        flush=True,
+    )
     threading.Thread(target=native_prepare, args=(prep,), daemon=True).start()
 
 
 def native_prepare(prep: dict) -> None:
     sid = prep["id"]
     try:
-        info = native_track_info(sid)
-        if info.get("title"):
-            prep["info"] = info
-            prep["query"] = f"{info.get('artists', '')} {info['title']}".strip()
-        if not prep["query"]:
-            prep["error"] = "no metadata"
+        query = str(prep.get("query") or "").strip()
+        if not query:
+            # maind.log sometimes writes the directive just before the
+            # recognisedPhrase line.  Give the voice text a moment to arrive.
+            deadline = time.time() + 2.5
+            while not query and time.time() < deadline:
+                time.sleep(0.05)
+                with NATIVE_LOCK:
+                    voice = NATIVE.get("voice") or {}
+                    if voice and time.time() - float(voice.get("at") or 0.0) < 30.0:
+                        query = str(voice.get("query") or "").strip()
+            prep["query"] = query
+        if not query:
+            prep["error"] = "no recognised voice query"
             return
-        items = yt_search(prep["query"], limit=5)
+        items = yt_search(query, limit=5)
         if not items:
             prep["error"] = "nothing found on YouTube"
             return
-        first = native_pick(items, prep.get("info") or {})
-        order = [first] + [i for i in items if i["id"] != first["id"]]
+        order = list(items)
         last_exc = "no downloadable result"
         for cand in order[:4]:
             try:
@@ -2259,7 +2193,10 @@ def native_activate(sid: str, prep: dict) -> None:
             NATIVE["prep"].pop(sid, None)
         STATE.kill_current()
         with STATE.lock:
-            STATE.queue = []
+            # Keep the other YouTube search results as a local queue, so the
+            # web UI "next" button works for voice requests without asking
+            # Yandex Music for another track.
+            STATE.queue = list(prep.get("others") or [])
             STATE.queue_pos = 0
             STATE.playlist = None
         time.sleep(0.2)
@@ -2359,32 +2296,6 @@ def native_cli_send(text: str) -> bool:
             return False
 
 
-def native_text_query(text: str) -> bool:
-    """Ask the Station's own Alice to run a text query (auto-next)."""
-    with NATIVE_CLI_LOCK:
-        proc = native_cli_ensure()
-        if proc is None or proc.stdin is None:
-            return False
-        ready = NATIVE_CLI["ready"]
-        if ready is not None and not ready.wait(6):
-            return False
-        prompt = NATIVE_CLI.get("prompt")
-        if prompt is not None:
-            prompt.clear()
-        try:
-            proc.stdin.write("q\n")
-            proc.stdin.flush()
-            if prompt is not None:
-                prompt.wait(3)
-            proc.stdin.write(text + "\n")
-            proc.stdin.flush()
-            return True
-        except Exception as exc:
-            print(f"native: cli write failed: {exc}", flush=True)
-            NATIVE_CLI["proc"] = None
-            return False
-
-
 def native_mark_local_switch(seconds: float = 4.0) -> None:
     """Ignore the cloud's own player_start after we switched track locally."""
     with NATIVE_LOCK:
@@ -2467,10 +2378,9 @@ def native_handle_line(line: str) -> None:
                     NATIVE["continuing"][sid] = time.time() + 8.0
             resume()
         elif name == "player_next":
-            if play_next().get("ok"):
-                native_mark_local_switch(4.0)
-            else:
-                native_text_query("следующий трек")
+            # Keep the cloud out of it: play the next item from our own queue
+            # instead of asking Yandex Music for the next track.
+            native_local_next("directive")
         elif name == "player_prev":
             if play_prev().get("ok"):
                 native_mark_local_switch(4.0)
@@ -2639,11 +2549,6 @@ class Handler(BaseHTTPRequestHandler):
             return
         if p == "/api/youtube/logout":
             self._json(youtube_logout())
-            return
-        if p == "/api/alice":
-            text = (qs.get("text") or [""])[0].strip()
-            ok = native_text_query(text) if text else False
-            self._json({"ok": ok, "text": text})
             return
         if p == "/api/youtube/settings":
             patch: dict = {}
